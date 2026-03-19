@@ -529,18 +529,20 @@ async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                         # Dùng verify_mail.py (Playwright) thay cho call_verification_link
                         try:
                             await asyncio.to_thread(verify_mail.verify_link, verification_link)
-                            message = (
-                                "✅ <b>Xác minh thành công!</b>\n\n"
+                            message = "✅ <b>Xác minh thành công!</b>\n\n"
+                            read_btn = InlineKeyboardButton(
+                                text="📩 Đọc Mail",
+                                callback_data=f"email_read_{job_id}",
                             )
+                            reply_markup = InlineKeyboardMarkup([[read_btn]])
                             await query.message.reply_text(
                                 message,
                                 parse_mode="HTML",
+                                reply_markup=reply_markup,
                             )
                         except Exception as e:
                             print(e)
-                            message = (
-                                "❌ <b>Xác minh thất bại</b>\n\n"
-                            )
+                            message = "❌ <b>Xác minh thất bại</b>\n\n"
                             await query.message.reply_text(
                                 message,
                                 parse_mode="HTML",
