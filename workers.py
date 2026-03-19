@@ -1,0 +1,186 @@
+# -*- coding: utf-8 -*-
+"""
+Worker handlers cho c\u00e1c lo\u1ea1i job kh\u00e1c nhau
+"""
+
+import time
+from job_queue import Job
+from typing import Dict, Any
+import login
+import email_utils
+from proxy_storage import get_user_best_proxy
+from email_utils import process_mailfree
+
+def handle_cvc(job: Job) -> Dict[str, Any]:
+    """
+    Handler \u0111\u1ec3 x\u1eed l\u00fd command /cvc - gi\u1ea3 l\u1eadp x\u1eed l\u00fd m\u1ea5t 20 gi\u00e2y
+    
+    D\u1eef li\u1ec7u t\u1eeb context \u0111\u01b0\u1ee3c truy\u1ec1n v\u00e0o job.data khi t\u1ea1o job trong cvc_command
+    Worker tr\u1ea3 v\u1ec1 result, v\u00e0 check_job_status s\u1ebd g\u1eedi message cho user
+    """
+    # L\u1ea5y d\u1eef li\u1ec7u t\u1eeb job.data (\u0111\u01b0\u1ee3c truy\u1ec1n t\u1eeb context trong cvc_command)
+    input_data = job.data.get("input")  # L\u1ea5y tham s\u1ed1 \u0111\u1ea7u ti\u00ean t\u1eeb context.args
+    args = job.data.get("args", [])  # L\u1ea5y to\u00e0n b\u1ed9 args t\u1eeb context.args
+    
+    # C\u00f3 th\u1ec3 truy c\u1eadp c\u00e1c th\u00f4ng tin kh\u00e1c t\u1eeb job
+    user_id = job.user_id  # User ID t\u1eeb update.message.from_user.id
+    chat_id = job.chat_id  # Chat ID t\u1eeb update.message.chat.id
+    
+    # V\u00ed d\u1ee5: X\u1eed l\u00fd d\u1eef li\u1ec7u \u0111\u1ea7u v\u00e0o
+    if input_data:
+        # X\u1eed l\u00fd v\u1edbi input_data
+        processed_message = f"Hello, b\u1ea1n \u0111\u00e3 g\u1eedi: {input_data}"
+    else:
+        processed_message = "Hello"
+    
+    # Gi\u1ea3 l\u1eadp x\u1eed l\u00fd m\u1ea5t 20 gi\u00e2y (blocking operation)
+    time.sleep(20)
+
+    # Tr\u1ea3 v\u1ec1 k\u1ebft qu\u1ea3 \u0111\u1ec3 check_job_status g\u1eedi message cho user
+    return {
+        "status": "success",
+        "message": processed_message,
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "input_received": input_data,  # Tr\u1ea3 v\u1ec1 d\u1eef li\u1ec7u \u0111\u00e3 nh\u1eadn
+        "all_args": args  # Tr\u1ea3 v\u1ec1 t\u1ea5t c\u1ea3 args
+    }
+
+def handle_cks(job: Job) -> Dict[str, Any]:
+    input_data = job.data.get("input")  # L\u1ea5y tham s\u1ed1 \u0111\u1ea7u ti\u00ean t\u1eeb context.args
+    args = job.data.get("args", [])  # L\u1ea5y to\u00e0n b\u1ed9 args t\u1eeb context.args
+    user_id = job.user_id  # User ID t\u1eeb update.message.from_user.id
+    chat_id = job.chat_id  # Chat ID t\u1eeb update.message.chat.id
+    
+    if not input_data:
+        return {
+            "status": "error",
+            "error": "Thi\u1ebfu input data"
+        }
+    
+    try:
+        # Lấy proxy tốt nhất cho user (kiot ưu tiên, sau đó tới vnpx)
+        proxies, proxy_source = get_user_best_proxy(user_id)
+        if proxies == None:
+            return {
+                "status": "success",
+                "message": "❌ Vui lòng kiểm tra proxy nhé!!!",
+                "message_format": "HTML",
+            }
+        # Extract SPC_ST từ input (dùng proxy nếu có)
+        message_html = login.extract_spc_st_and_user_info(input_data, proxies=proxies, device_id="123")
+        return {
+            "status": "success",
+            "message": message_html,  # Message \u0111\u00e3 format HTML
+            "message_format": "HTML"  # \u0110\u00e1nh d\u1ea5u l\u00e0 HTML format
+            }
+    except Exception as e:
+        print(f"Error: {e}")
+        return {
+                    "status": "success",
+                    "message": "\u274c: Lấy cookie thất bại vui lòng thử lại",  # Message \u0111\u00e3 format HTML
+                    "message_format": "HTML"  # \u0110\u00e1nh d\u1ea5u l\u00e0 HTML format
+                }
+
+def handle_checkmail(job: Job) -> Dict[str, Any]:
+    """
+    Worker handler cho command /checkmail
+    Lấy danh sách email từ TempMail API và format lại
+    """
+    try:
+        # Lấy dữ liệu từ job
+        job_data = job.data or {}
+        email = job_data.get("email")
+        password = job_data.get("password")
+        
+        if not email or not password:
+            return {
+                "status": "error",
+                "error": "Thiếu email hoặc password"
+            }
+        
+        # Gọi API để lấy danh sách email
+        result = email_utils.get_emails_from_tempmail(email, password)
+        
+        if result["status"] == "error":
+            return {
+                "status": "error",
+                "error": result.get("error", "Lỗi không xác định")
+            }
+        
+        emails = result.get("emails", [])
+        
+        if not emails:
+            return {
+                "status": "success",
+                "message": "📭 Không có email nào trong hộp thư.",
+                "message_format": "text"
+            }
+        
+        # Format danh sách email
+        message = email_utils.format_emails_list(emails)
+        
+        return {
+            "status": "success",
+            "message": message,
+            "message_format": "HTML",
+            "emails": emails,  # Lưu emails để có thể truy xuất khi click button
+            "has_buttons": True  # Đánh dấu có buttons
+        }
+        
+    except Exception as e:
+        print(f"Error in handle_checkmail: {e}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+def handle_mailfree(job: Job) -> Dict[str, Any]:
+    """
+    Worker handler cho command /mailfree.
+    Input hỗ trợ 2 dạng:
+      1) SPC_ST=... (cookie) -> register_email_full để lấy email+password, sau đó add email.
+      2) id|pass|spc_f -> extract SPC_ST, sau đó add email.
+    """
+    user_id = job.user_id
+    job_data = job.data or {}
+    
+
+    raw = ""
+    if isinstance(job_data, dict):
+        raw = str(job_data.get("input") or "").strip()
+    else:
+        raw = str(job_data).strip()
+
+    if not raw:
+        return {"status": "success", "message": "❌ Thiếu input!!!"}
+    try:
+        proxies, proxy_source = get_user_best_proxy(user_id)
+        print(f"proxies:{proxies}")
+        print(f"proxy_source:{proxy_source}")
+        if proxies == None or proxies == {}:
+            return {
+                "status": "success",
+                "message": "❌ Vui lòng kiểm tra proxy nhé!!!",
+                "message_format": "HTML",
+            }
+        print(proxies)
+        result = process_mailfree(raw_input=raw, proxies=proxies)
+
+        # Nếu tạo email thành công thì thêm nút "Đọc email" (chuyển qua UI checkmail)
+        email = (result.get("email") or "").strip()
+        password = (result.get("password") or "").strip()
+        if email and password:
+            result["store_creds"] = {"email": email, "password": password}
+            result["inline_keyboard"] = [
+                [{"text": "📩 Đọc email", "callback_data": f"email_read_{job.job_id}"}]
+            ]
+
+        return result
+    except Exception as e:
+        print(f"Error in handle_mailfree: {e}")
+        return {
+            "status": "success",
+            "message": "❌ Không add được email free vui lòng thử lại!!!",
+            "message_format": "HTML",
+        }
