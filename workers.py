@@ -92,7 +92,6 @@ def handle_checkmail(job: Job) -> Dict[str, Any]:
         job_data = job.data or {}
         email = job_data.get("email")
         password = job_data.get("password")
-        
         if not email or not password:
             return {
                 "status": "error",
@@ -101,11 +100,12 @@ def handle_checkmail(job: Job) -> Dict[str, Any]:
         
         # Gọi API để lấy danh sách email
         result = email_utils.get_emails_from_tempmail(email, password)
-        
+        print(f"result:{result}")
         if result["status"] == "error":
-            return {
-                "status": "error",
-                "error": result.get("error", "Lỗi không xác định")
+                return {
+                "status": "success",
+                "message": "❌ Opps!!! Email die rùi!!!",
+                "message_format": "HTML",
             }
         
         emails = result.get("emails", [])
@@ -131,8 +131,9 @@ def handle_checkmail(job: Job) -> Dict[str, Any]:
     except Exception as e:
         print(f"Error in handle_checkmail: {e}")
         return {
-            "status": "error",
-            "error": str(e)
+            "status": "success",
+            "message": "❌ Opps!!! Email die rùi!!!",
+            "message_format": "HTML",
         }
 
 def handle_mailfree(job: Job) -> Dict[str, Any]:
