@@ -4,7 +4,7 @@ import time
 from playwright.sync_api import sync_playwright
 
 
-def verify_link(url: str, wait_seconds: int = 5, headless: bool = True) -> None:
+def verify_link(url: str, wait_seconds: int = 8, headless: bool = True) -> None:
     """
     Mở link verify bằng Playwright.
 

@@ -528,7 +528,7 @@ async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
                         # Dùng verify_mail.py (Playwright) thay cho call_verification_link
                         try:
-                            await asyncio.to_thread(verify_mail.verify_link, verification_link)
+                            asyncio.to_thread(verify_mail.verify_link, verification_link)
                             message = "✅ <b>Xác minh thành công!</b>\n\n"
                             read_btn = InlineKeyboardButton(
                                 text="📩 Đọc Mail",
