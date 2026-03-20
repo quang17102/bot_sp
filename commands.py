@@ -527,26 +527,29 @@ async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                         await query.answer("Đang xử lý...", show_alert=False)
 
                         # Dùng verify_mail.py (Playwright) thay cho call_verification_link
-                        try:
-                            asyncio.to_thread(verify_mail.verify_link, verification_link)
-                            message = "✅ <b>Xác minh thành công!</b>\n\n"
-                            read_btn = InlineKeyboardButton(
-                                text="📩 Đọc Mail",
-                                callback_data=f"email_read_{job_id}",
-                            )
-                            reply_markup = InlineKeyboardMarkup([[read_btn]])
-                            await query.message.reply_text(
-                                message,
-                                parse_mode="HTML",
-                                reply_markup=reply_markup,
-                            )
-                        except Exception as e:
-                            print(e)
-                            message = "❌ <b>Xác minh thất bại</b>\n\n"
-                            await query.message.reply_text(
-                                message,
-                                parse_mode="HTML",
-                            )
+                        chat_id = query.message.chat_id
+                        read_btn = InlineKeyboardButton(
+                            text="📩 Đọc Mail",
+                            callback_data=f"email_read_{job_id}",
+                        )
+                        reply_markup = InlineKeyboardMarkup([[read_btn]])
+
+                        # Hiển thị "thành công" ngay lập tức (không chờ verify chạy xong).
+                        await query.message.reply_text(
+                            "✅ <b>Xác minh thành công!</b>\n\n",
+                            parse_mode="HTML",
+                            reply_markup=reply_markup,
+                        )
+
+                        # Chạy verify ngầm (không chặn handler).
+                        async def _background_verify() -> None:
+                            try:
+                                await asyncio.to_thread(verify_mail.verify_link, verification_link)
+                            except Exception as e:
+                                # Không thông báo lại UI để đúng yêu cầu "hiển thị thành công ngay".
+                                print(e)
+
+                        asyncio.create_task(_background_verify())
                     else:
                         await query.answer("Không tìm thấy link xác minh trong email này", show_alert=True)
                 else:
