@@ -3,7 +3,8 @@
 Command handlers cho Telegram Bot
 T\u1EA5t c\u1EA3 c\u00E1c command handlers \u0111\u01B0\u1EE3c \u0111\u1ECBnh ngh\u0129a \u1EDF \u0111\u00E2y
 """
-
+import html
+import checkmvd
 import asyncio
 from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -24,6 +25,62 @@ _email_cache: dict[str, list] = {}
 # Lưu credential để refresh inbox theo job_id
 # Format: {job_id: {"email": "...", "password": "..."}}
 _email_creds: dict[str, dict[str, str]] = {}
+
+
+def _escape(v) -> str:
+    return html.escape(str(v or ""))
+
+
+def _copyable(v) -> str:
+    """Giá trị bọc <code> để người dùng dễ chạm copy trên Telegram (parse_mode HTML)."""
+    return f"<code>{_escape(v)}</code>"
+
+
+def format_order_like_form(order: dict) -> str:
+    order_id = order.get("order_id", "")
+    status = order.get("status", "") or ""
+    order_time = order.get("order_time", "")
+    shipping_name = order.get("shipping_name", "")
+    shipping_phone = order.get("shipping_phone", "")
+    shipping_address = order.get("shipping_address", "")
+    name = order.get("name", "") or "Khong co ten"
+    model_name = order.get("model_name") or ""
+    tracking = order.get("tracking_number") or "Khong co ma van don"
+    logistics = order.get("logistics") or {}
+    carrier = logistics.get("carrier_name") or ""
+    # Chọn “trạng thái mô tả” kiểu form: ưu tiên history, fallback status
+    history = logistics.get("history") or []
+    status_text = status
+    if isinstance(history, list) and history:
+        # dùng mô tả sự kiện cuối cùng (thường là trạng thái mới nhất)
+        last = history[-1] or {}
+        desc = last.get("description") or ""
+        if desc:
+            status_text = desc
+    total_money = checkmvd.format_money_for_total(order.get("final_total"))
+    # Nếu trạng thái bị hủy -> có dòng đỏ "Hủy đơn" giống ảnh (đơn giản theo keyword)
+    s_lower = str(status_text).lower()
+    is_cancel = ("huy" in s_lower) or ("hoan tra" in s_lower) or ("hoan tien" in s_lower) or ("da huy" in s_lower)
+    # Build UI text giống form — các trường quan trọng bọc <code> để copy nhanh
+    lines = []
+    lines.append(f"🧾 <b>Đơn #{_escape(order_id)}</b>")
+    # if order_time:
+    #     lines.append(f"🕒 <b>Thời gian:</b> {_escape(order_time)}")
+    lines.append(f"\n👤 <b>Người nhận:</b> {_copyable(shipping_name)}")
+    lines.append(f"📞 <b>SDT:</b> {_copyable(shipping_phone)}")
+    lines.append(f"🏠 <b>Địa chỉ:</b> {_copyable(shipping_address)}")
+    if carrier:
+        lines.append(f"\n🚚 <b>Mã vận đơn:</b> {_copyable(tracking)} ({_escape(carrier)})")
+    else:
+        lines.append(f"\n🚚 <b>Mã vận đơn:</b> {_copyable(tracking)}")
+    lines.append(f"\n📦 <b>Sản phẩm:</b> {_copyable(name)}")
+    if model_name:
+        lines.append(f"  <b>Phân loại:</b> {_copyable(model_name)}")
+    lines.append(f"\n💰 <b>Tổng cộng:</b> {_escape(total_money)} đ")
+    lines.append(f"\n🔎 <b>Trạng thái:</b> {_escape(status_text)}")
+    if is_cancel:
+        lines.append("\n❌ <b>Hủy đơn</b>")
+    return "\n".join(lines)
 
 async def cvc_command(update: Update, context: ContextTypes.DEFAULT_TYPE, job_queue: JobQueue, bot_app: 'Application'):
     """Handler cho command /cvc"""
@@ -239,6 +296,38 @@ async def check_job_status(chat_id: int, job_id: str, job_queue: JobQueue, bot_a
                     parse_mode='HTML',
                     reply_markup=reply_markup,
                 )
+                store_creds = result.get("store_creds")  # cookie_text = "SPC_ST=..."
+            if job.job_type == "cks" and isinstance(store_creds, str) and store_creds.startswith("SPC_ST="):
+                # chạy lấy đơn trong thread (blocking) — dùng cùng proxy worker đã trả về (login + API đơn)
+                try:
+                    print("Lấy đơn")
+                    order_proxies = result.get("proxies")
+                    if order_proxies is not None and not isinstance(order_proxies, dict):
+                        order_proxies = None
+                    orders = await asyncio.to_thread(
+                        checkmvd.collect_orders,
+                        store_creds,      # cookie
+                        10,               # page_size
+                        15,               # timeout
+                        5,                # max_orders
+                        False,            # include_logistics
+                        order_proxies,    # proxies (http/https) — khớp handle_cks / get_user_best_proxy
+                    )
+                    # format message 2 (tránh quá dài)
+                    msg = "📋 <b>Danh sách đơn hàng</b>\n\n"
+                    for i, od in enumerate(orders[:3], start=1):
+                        msg += f"{format_order_like_form(od)}\n\n— — —\n\n"
+                    await bot_app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
+                except Exception as e:
+                    print(f"Lỗi lấy đơn (/cks): {e}")
+                    await bot_app.bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            "❌ <b>Lấy đơn bị lỗi</b>\n\n"
+                            "Hãy báo cho admin biết có lỗi này nhé."
+                        ),
+                        parse_mode="HTML",
+                    )
             else:
                 # Format m\u1EB7c \u0111\u1ECBnh
                 await bot_app.bot.send_message(

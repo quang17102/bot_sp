@@ -61,19 +61,41 @@ def handle_cks(job: Job) -> Dict[str, Any]:
     try:
         # Lấy proxy tốt nhất cho user (kiot ưu tiên, sau đó tới vnpx)
         proxies, proxy_source = get_user_best_proxy(user_id)
-        if proxies == None:
+        if proxies is None or proxies == {}:
             return {
                 "status": "success",
                 "message": "❌ Vui lòng kiểm tra proxy nhé!!!",
                 "message_format": "HTML",
             }
         # Extract SPC_ST từ input (dùng proxy nếu có)
-        message_html = login.extract_spc_st_and_user_info(input_data, proxies=proxies, device_id="123")
+        user_info = login.extract_spc_st_and_user_info(input_data, proxies=proxies, device_id="123")
+        
+        def format_copyable(value: str) -> str:
+            if not value or value == "None":
+                return "None"
+            return f"<code>{value}</code>"
+
+        proxy_label = proxy_source or "unknown"
+        cookie_text = f"SPC_ST={user_info['spc_st']}"
+        message_html = (
+            "✅ Nhấn vô Cookies để COPY\n\n"
+            f"<code>{cookie_text}</code>\n\n"
+            f"🌐 <b>Proxy:</b> <code>{proxy_label}</code>\n\n"
+            "<b>📋 Thông Tin Tài Khoản:</b>\n"
+            f"• Username: {format_copyable(user_info['username'])}\n"
+            f"• Email: {format_copyable(user_info['email'])}\n"
+            f"• Phone: {format_copyable(user_info['phone'])}\n"
+            f"• Ngày tạo: {format_copyable(user_info['created'])}"
+        )
         return {
             "status": "success",
-            "message": message_html,  # Message \u0111\u00e3 format HTML
-            "message_format": "HTML"  # \u0110\u00e1nh d\u1ea5u l\u00e0 HTML format
-            }
+            "message": message_html,
+            "message_format": "HTML",
+            "store_creds": cookie_text,
+            # Cùng dict proxy dùng cho login — truyền tiếp sang collect_orders (checkmvd)
+            "proxies": proxies,
+            "proxy_source": proxy_label,
+        }
     except Exception as e:
         print(f"Error: {e}")
         return {

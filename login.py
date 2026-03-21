@@ -196,27 +196,10 @@ def extract_spc_st_and_user_info(
             "created": user_info_api.get("created_at_iso_utc", ""),
         }
 
-        cookie_text = f"SPC_ST={user_info['spc_st']}"
-
-        def format_copyable(value: str) -> str:
-            if not value or value == "None":
-                return "None"
-            return f"<code>{value}</code>"
-
-        message_html = (
-            "✅ Nhấn vô Cookies để COPY\n\n"
-            f"<code>{cookie_text}</code>\n\n"
-            "<b>📋 Thông Tin Tài Khoản:</b>\n"
-            f"• Username: {format_copyable(user_info['username'])}\n"
-            f"• Email: {format_copyable(user_info['email'])}\n"
-            f"• Phone: {format_copyable(user_info['phone'])}\n"
-            f"• Ngày tạo: {format_copyable(user_info['created'])}"
-        )
-
-        return message_html
+        return user_info
     except Exception as e:
         # Lỗi chung: trả về message giống workers.py (207–211)
-        return "❌: Lấy cookie thất bại vui lòng thử lại"
+        return {}
 
 def build_spc_st_cookie(spc_st: str) -> str:
     raw = (spc_st or "").strip()
