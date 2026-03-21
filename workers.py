@@ -4,12 +4,56 @@ Worker handlers cho c\u00e1c lo\u1ea1i job kh\u00e1c nhau
 """
 
 import time
+from datetime import datetime, timedelta, timezone
 from job_queue import Job
-from typing import Dict, Any
+from typing import Any, Dict
 import login
 import email_utils
 from proxy_storage import get_user_best_proxy
 from email_utils import process_mailfree
+
+# Giờ Việt Nam (UTC+7, không DST)
+_TZ_VN = timezone(timedelta(hours=7))
+
+def _format_created_display(created_raw: Any) -> str:
+    """
+    Đưa created từ API (ISO UTC, epoch, hoặc chuỗi) về dạng: dd/mm/yyyy HH:mm:ss (theo giờ VN).
+    Ví dụ: 04/03/2026 06:38:34
+    """
+    if created_raw is None:
+        return "None"
+    s = str(created_raw).strip()
+    if not s or s.lower() == "none":
+        return "None"
+    try:
+        # ISO 8601 (vd. 2026-03-04T06:38:34+00:00 hoặc ...Z)
+        if "T" in s or (len(s) >= 10 and s[4:5] == "-" and s[7:8] == "-"):
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                # Coi naive là UTC (thường gặp từ API)
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(_TZ_VN).strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        pass
+    try:
+        # "2026-03-04 06:38:34" (không có timezone)
+        if len(s) >= 19 and s[4:5] == "-" and s[7:8] == "-" and s[10:11] in " T":
+            dt = datetime.strptime(s[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S")
+            dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(_TZ_VN).strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        pass
+    try:
+        # Unix seconds / milliseconds
+        num = float(s)
+        if num > 1e12:
+            num = num / 1000.0
+        dt = datetime.fromtimestamp(num, tz=timezone.utc).astimezone(_TZ_VN)
+        return dt.strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        pass
+    return s
+
 
 def handle_cvc(job: Job) -> Dict[str, Any]:
     """
@@ -80,12 +124,11 @@ def handle_cks(job: Job) -> Dict[str, Any]:
         message_html = (
             "✅ Nhấn vô Cookies để COPY\n\n"
             f"<code>{cookie_text}</code>\n\n"
-            f"🌐 <b>Proxy:</b> <code>{proxy_label}</code>\n\n"
             "<b>📋 Thông Tin Tài Khoản:</b>\n"
             f"• Username: {format_copyable(user_info['username'])}\n"
             f"• Email: {format_copyable(user_info['email'])}\n"
             f"• Phone: {format_copyable(user_info['phone'])}\n"
-            f"• Ngày tạo: {format_copyable(user_info['created'])}"
+            f"• Ngày tạo: {format_copyable(_format_created_display(user_info.get('created')))}"
         )
         return {
             "status": "success",

@@ -328,8 +328,8 @@ async def check_job_status(chat_id: int, job_id: str, job_queue: JobQueue, bot_a
                         ),
                         parse_mode="HTML",
                     )
-            else:
-                # Format m\u1EB7c \u0111\u1ECBnh
+            elif not has_buttons and message_format != "HTML":
+                # Chỉ job kiểu text đơn (vd. /cvc) — đã gửi HTML hoặc có nút thì KHÔNG gửi thêm (tránh trùng + lỗi hiển thị <b>)
                 await bot_app.bot.send_message(
                     chat_id=chat_id,
                     text=f"\u2705 Ho\u00E0n th\u00E0nh!\n{message}"
