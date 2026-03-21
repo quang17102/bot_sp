@@ -333,7 +333,38 @@ def extract_order_time(detail_data: dict[str, Any]) -> str:
     return "Khong co"
 
 
-def extract_first_item(source: dict[str, Any]) -> dict[str, Any]:
+def _shipping_extra_from_block(shipping_block: dict[str, Any] | None) -> dict[str, Any]:
+    """
+    Lấy thêm từ khối shipping: tracking_number, text masked_carrier (hiển thị đơn vị VC...).
+    `masked_carrier` có thể là dict (có tracking_number / text) hoặc chuỗi.
+    """
+    if not isinstance(shipping_block, dict):
+        return {}
+    out: dict[str, Any] = {}
+    mc = shipping_block.get("masked_carrier")
+    if isinstance(mc, dict):
+        tn = mc.get("tracking_number")
+        if tn:
+            out["tracking_number"] = str(tn).strip()
+        txt = mc.get("text")
+        if txt:
+            out["masked_carrier_text"] = str(txt).strip()
+    elif isinstance(mc, str) and mc.strip():
+        out["masked_carrier_text"] = mc.strip()
+    if not out.get("tracking_number"):
+        tn = shipping_block.get("tracking_number")
+        if tn:
+            out["tracking_number"] = str(tn).strip()
+    return out
+
+
+def extract_first_item(source: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """
+    Trả về (item đầu tiên trong đơn, dict bổ sung từ shipping / masked_carrier / parcel đầu).
+    Dict thứ hai dùng để suy ra mã vận đơn khi shipping top-level chưa có.
+    """
+    shipping_extra = _shipping_extra_from_block(source.get("shipping"))
+
     parcel_cards = source.get("info_card", {}).get("parcel_cards", []) or []
     if not parcel_cards:
         order_list_cards = source.get("info_card", {}).get("order_list_cards", []) or []
@@ -341,19 +372,25 @@ def extract_first_item(source: dict[str, Any]) -> dict[str, Any]:
             parcel_cards = order_list_cards[0].get("parcel_cards", []) or []
 
     if parcel_cards:
-        item_groups = parcel_cards[0].get("product_info", {}).get("item_groups", []) or []
+        pc0 = parcel_cards[0] or {}
+        for k, v in _shipping_extra_from_block(pc0.get("shipping")).items():
+            if not v:
+                continue
+            if k == "tracking_number" or not shipping_extra.get(k):
+                shipping_extra[k] = v
+        item_groups = pc0.get("product_info", {}).get("item_groups", []) or []
         if item_groups:
             items = item_groups[0].get("items", []) or []
             if items:
-                return items[0] or {}
+                return (items[0] or {}, shipping_extra)
 
     item_groups = source.get("info_card", {}).get("product_info", {}).get("item_groups", []) or []
     if item_groups:
         items = item_groups[0].get("items", []) or []
         if items:
-            return items[0] or {}
+            return (items[0] or {}, shipping_extra)
 
-    return {}
+    return ({}, shipping_extra)
 
 
 def format_unix_seconds(unix_seconds: int | None) -> str:
@@ -400,7 +437,7 @@ def build_order_record(order_id: str, cached_order: CachedOrder, detail_data: di
     tracking_info = shipping.get("tracking_info", {}) or {}
     delivery_info = shipping.get("delivery_info", {}) or {}
     address = source.get("address", {}) or {}
-    first_item = extract_first_item(source)
+    first_item, shipping_extra = extract_first_item(source)
     logistics = extract_logistics_summary(logistics_data)
 
     status = normalize_status_text(
@@ -424,11 +461,15 @@ def build_order_record(order_id: str, cached_order: CachedOrder, detail_data: di
         or (logistics or {}).get("history", [{}])[0].get("driver_phone")
         or ""
     )
-
+    tracking_number = (
+        shipping.get("tracking_number")
+        or shipping_extra.get("masked_carrier_text")
+        or (logistics or {}).get("tracking_number")
+    ) or "Khong co ma van don"
     return {
         "order_id": order_id,
         "status": status,
-        "tracking_number": shipping.get("tracking_number") or (logistics or {}).get("tracking_number") or "Khong co ma van don",
+        "tracking_number": tracking_number,
         "order_time": extract_order_time(detail_data) if detail_data else "Khong co",
         "final_total": cached_order.final_total or first_item.get("order_price") or 0,
         "shipping_name": address.get("shipping_name") or "",
@@ -545,7 +586,6 @@ def collect_orders(
 
         orders.append(build_order_record(order_id, cached_orders[order_id], detail_data, logistics_data))
         print(f"Da xu ly {index}/{len(order_ids)} don", file=sys.stderr)
-
     return orders
 
 
@@ -597,7 +637,7 @@ def main() -> int:
     # Nếu có truyền SPC_ST/full cookie qua CLI thì dùng,
     # nếu không thì fallback sang coo
     # kie hardcode (dùng để test nhanh).
-    cooki = "SPC_ST=SWlLckRheEpMejZCS25qcIBA5b6LMc4hHq7HeFswVy35aR7aP4KIQm06TElYi0Yme4BWszPa3s9DxWXwIQQxDtY/QZ8lpTzIHB/ERxBCZFswQ6yU6qdENt5a5lus8wGnSzjMbc0jWQEa1bQ6FC1MWS3HCAw6AMqPRtJxBCflEgpvIsSRK1NWRbbqOq2XAJWSwYY9XHdGvtCIhgAsNva8KyHeF3fI+5pPvdLboClbXlw=.AJuS0x36JDeMiRCfg/LKuCOXWoB6bg7JdxJHZEy5zHDm"
+    cooki = "SPC_ST=YnBteXZrMTRBQ1BBS1hwTItszNp3f3bTfi5O7hjQqcLVe8YKDx17qiRwQ80XChOAenhnlOJayfWuMLkBBqJ0dxmD0HjLCSfhuxuW7uMoXsCR2i8fA+390QbRXBbzxF6RDB+G1cMSNyz+VU0+agZZ4edDP8wf96KWIbdsarmKsde3DMXn64e+2Eb6BYc/bjqiYx7c+ewRWFqzHd2/adQF6f5SrcQrLADbl3ViqxcJZrg=.APVD8g7HIfBB4EwXzKcReayihfNCUz5OvzUZDHxz4YfS"
     orders = get_don_hang(cooki)
     print_report(orders)
     # print(f"orders: {orders}")
