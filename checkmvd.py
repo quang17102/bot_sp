@@ -8,6 +8,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+import unicodedata
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -15,69 +16,69 @@ from urllib.request import Request, ProxyHandler, build_opener, urlopen
 
 
 TRACKING_STATUS_MAP: dict[str, str] = {
-    "label_preparing_order": "Dang chuan bi don hang",
-    "preparing_order": "Dang chuan bi don hang",
-    "label_order_prepared": "Don hang da san sang",
-    "order_prepared": "Don hang da san sang",
-    "label_to_ship": "Cho gui hang",
-    "to_ship": "Cho gui hang",
-    "label_to_receive": "Dang giao",
-    "to_receive": "Dang giao",
-    "order_list_text_to_ship_edt": "Cho gui hang",
-    "order_status_text_to_ship_order_edt_cod": "Cho gui hang (COD)",
-    "order_status_text_to_ship_order_edt": "Cho gui hang",
-    "label_waiting_pickup": "Cho lay hang",
-    "waiting_pickup": "Cho lay hang",
-    "label_pickup_scheduled": "Da len lich lay hang",
-    "pickup_scheduled": "Da len lich lay hang",
-    "label_in_transit": "Dang van chuyen",
-    "in_transit": "Dang van chuyen",
-    "label_on_the_way": "Dang tren duong giao",
-    "on_the_way": "Dang tren duong giao",
-    "label_out_for_delivery": "Dang giao hang",
-    "out_for_delivery": "Dang giao hang",
-    "label_delivered": "Da giao hang",
-    "delivered": "Da giao hang",
-    "label_delivery_confirmed": "Da xac nhan giao hang",
-    "delivery_confirmed": "Da xac nhan giao hang",
-    "label_completed": "Hoan thanh",
-    "completed": "Hoan thanh",
-    "label_order_completed": "Don hang hoan thanh",
-    "order_completed": "Don hang hoan thanh",
-    "label_cancelled": "Da huy",
-    "cancelled": "Da huy",
-    "label_order_cancelled": "Da huy",
-    "order_cancelled": "Da huy",
-    "label_cancel_order_reason_admin_901": "Huy boi he thong",
-    "cancel_order_reason_admin_901": "Huy boi he thong",
-    "label_return_requested": "Yeu cau hoan tra",
-    "return_requested": "Yeu cau hoan tra",
-    "label_returned": "Da hoan tra",
-    "returned": "Da hoan tra",
-    "label_refunded": "Da hoan tien",
-    "refunded": "Da hoan tien",
-    "label_pending_payment": "Cho thanh toan",
-    "pending_payment": "Cho thanh toan",
-    "label_payment_failed": "Thanh toan that bai",
-    "payment_failed": "Thanh toan that bai",
-    "label_processing": "Dang xu ly",
-    "processing": "Dang xu ly",
-    "label_ship_by_date_not_calculated": "Dang xu ly",
-    "ship_by_date_not_calculated": "Dang xu ly",
-    "label_confirmed": "Da xac nhan",
-    "confirmed": "Da xac nhan",
-    "label_delivery_failed": "Giao hang that bai",
-    "delivery_failed": "Giao hang that bai",
-    "label_delivery_attempted": "Da thu giao hang",
-    "delivery_attempted": "Da thu giao hang",
-    "label_delivery_delayed": "Giao hang bi tre",
-    "delivery_delayed": "Giao hang bi tre",
-    "label_arrived_at_warehouse": "Da den kho",
-    "arrived_at_warehouse": "Da den kho",
-    "label_left_warehouse": "Da roi kho",
-    "left_warehouse": "Da roi kho",
-    "label_at_sorting_center": "Dang tai trung tam phan loai",
-    "at_sorting_center": "Dang tai trung tam phan loai",
+    "label_preparing_order": "Đang chuẩn bị đơn hàng",
+    "preparing_order": "Đang chuẩn bị đơn hàng",
+    "label_order_prepared": "Đơn hàng đã sẵn sàng",
+    "order_prepared": "Đơn hàng đã sẵn sàng",
+    "label_to_ship": "Chờ gửi hàng",
+    "to_ship": "Chờ gửi hàng",
+    "label_to_receive": "Đang giao",
+    "to_receive": "Đang giao",
+    "order_list_text_to_ship_edt": "Chờ gửi hàng",
+    "order_status_text_to_ship_order_edt_cod": "Chờ gửi hàng (COD)",
+    "order_status_text_to_ship_order_edt": "Chờ gửi hàng",
+    "label_waiting_pickup": "Chờ lấy hàng",
+    "waiting_pickup": "Chờ lấy hàng",
+    "label_pickup_scheduled": "Đã lên lịch lấy hàng",
+    "pickup_scheduled": "Đã lên lịch lấy hàng",
+    "label_in_transit": "Đang vận chuyển",
+    "in_transit": "Đang vận chuyển",
+    "label_on_the_way": "Đang trên đường giao",
+    "on_the_way": "Đang trên đường giao",
+    "label_out_for_delivery": "Đang giao hàng",
+    "out_for_delivery": "Đang giao hàng",
+    "label_delivered": "Đã giao hàng",
+    "delivered": "Đã giao hàng",
+    "label_delivery_confirmed": "Đã xác nhận giao hàng",
+    "delivery_confirmed": "Đã xác nhận giao hàng",
+    "label_completed": "Hoàn thành",
+    "completed": "Hoàn thành",
+    "label_order_completed": "Đơn hàng hoàn thành",
+    "order_completed": "Đơn hàng hoàn thành",
+    "label_cancelled": "Đã hủy",
+    "cancelled": "Đã hủy",
+    "label_order_cancelled": "Đã hủy",
+    "order_cancelled": "Đã hủy",
+    "label_cancel_order_reason_admin_901": "Hủy bởi hệ thống",
+    "cancel_order_reason_admin_901": "Hủy bởi hệ thống",
+    "label_return_requested": "Yêu cầu hoàn trả",
+    "return_requested": "Yêu cầu hoàn trả",
+    "label_returned": "Đã hoàn trả",
+    "returned": "Đã hoàn trả",
+    "label_refunded": "Đã hoàn tiền",
+    "refunded": "Đã hoàn tiền",
+    "label_pending_payment": "Chờ thanh toán",
+    "pending_payment": "Chờ thanh toán",
+    "label_payment_failed": "Thanh toán thất bại",
+    "payment_failed": "Thanh toán thất bại",
+    "label_processing": "Đang xử lý",
+    "processing": "Đang xử lý",
+    "label_ship_by_date_not_calculated": "Đang xử lý",
+    "ship_by_date_not_calculated": "Đang xử lý",
+    "label_confirmed": "Đã xác nhận",
+    "confirmed": "Đã xác nhận",
+    "label_delivery_failed": "Giao hàng thất bại",
+    "delivery_failed": "Giao hàng thất bại",
+    "label_delivery_attempted": "Đã thử giao hàng",
+    "delivery_attempted": "Đã thử giao hàng",
+    "label_delivery_delayed": "Giao hàng bị trễ",
+    "delivery_delayed": "Giao hàng bị trễ",
+    "label_arrived_at_warehouse": "Đã đến kho",
+    "arrived_at_warehouse": "Đã đến kho",
+    "label_left_warehouse": "Đã rời kho",
+    "left_warehouse": "Đã rời kho",
+    "label_at_sorting_center": "Đang tại trung tâm phân loại",
+    "at_sorting_center": "Đang tại trung tâm phân loại",
 }
 
 DELIVERING_KEYWORDS = (
@@ -118,27 +119,46 @@ class ShopeeApiError(RuntimeError):
     pass
 
 
-def normalize_status_text(value: str | None, fallback: str = "Khong xac dinh") -> str:
+def _fold_vi(s: str) -> str:
+    """Bỏ dấu tiếng Việt để so khớp từ khóa (classify_status)."""
+    nfd = unicodedata.normalize("NFD", s)
+    return "".join(ch for ch in nfd if unicodedata.category(ch) != "Mn")
+
+
+def fold_vietnamese(s: str) -> str:
+    """API công khai: bỏ dấu (dùng khi so khớp keyword từ chuỗi có dấu)."""
+    return _fold_vi(s)
+
+
+def _sentence_case_vi(s: str) -> str:
+    """Viết hoa ký tự đầu câu (giữ nguyên phần còn lại)."""
+    s = (s or "").strip()
+    if not s:
+        return s
+    return s[0].upper() + s[1:]
+
+
+def normalize_status_text(value: str | None, fallback: str = "Không xác định") -> str:
     if not value:
-        return fallback
+        return _sentence_case_vi(fallback) if fallback else ""
 
     normalized = str(value).strip()
     if not normalized:
-        return fallback
+        return _sentence_case_vi(fallback) if fallback else ""
 
     if normalized in TRACKING_STATUS_MAP:
-        return TRACKING_STATUS_MAP[normalized]
+        return _sentence_case_vi(TRACKING_STATUS_MAP[normalized])
 
     lowered = normalized.lower()
     if lowered in TRACKING_STATUS_MAP:
-        return TRACKING_STATUS_MAP[lowered]
+        return _sentence_case_vi(TRACKING_STATUS_MAP[lowered])
 
     if lowered.startswith("label_"):
         without_prefix = lowered.removeprefix("label_")
         if without_prefix in TRACKING_STATUS_MAP:
-            return TRACKING_STATUS_MAP[without_prefix]
+            return _sentence_case_vi(TRACKING_STATUS_MAP[without_prefix])
 
-    return normalized
+    return _sentence_case_vi(normalized)
 
 
 def ensure_cookie_string(raw_cookie: str) -> str:
@@ -423,7 +443,7 @@ def extract_logistics_summary(logistics_data: dict[str, Any] | None) -> dict[str
     time_display = logistics_data.get("time_display", {}) or {}
     return {
         "shipping_status": normalize_status_text(logistics_data.get("shipping_status"), ""),
-        "carrier_name": logistics_data.get("carrier_name") or logistics_data.get("channel_name") or "Khong xac dinh",
+        "carrier_name": logistics_data.get("carrier_name") or logistics_data.get("channel_name") or "Không xác định",
         "tracking_number": logistics_data.get("tracking_number") or "Khong co ma van don",
         "expected_time_type": normalize_status_text(time_display.get("type"), "Ngay nhan hang du kien"),
         "expected_time_text": format_unix_seconds(time_display.get("time")),
@@ -444,7 +464,7 @@ def build_order_record(order_id: str, cached_order: CachedOrder, detail_data: di
         tracking_info.get("description")
         or source.get("status", {}).get("status_label", {}).get("text")
         or source.get("status", {}).get("list_view_status_label", {}).get("text"),
-        "Khong xac dinh",
+        "Không xác định",
     )
 
     driver_name = (
@@ -490,7 +510,7 @@ def build_order_record(order_id: str, cached_order: CachedOrder, detail_data: di
 
 
 def classify_status(status: str) -> str:
-    lowered = status.lower()
+    lowered = _fold_vi(status.lower())
     if any(keyword in lowered for keyword in CANCELLED_KEYWORDS):
         return "cancelled"
     if any(keyword in lowered for keyword in DELIVERING_KEYWORDS):

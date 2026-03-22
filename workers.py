@@ -179,7 +179,13 @@ def handle_checkmail(job: Job) -> Dict[str, Any]:
             return {
                 "status": "success",
                 "message": "📭 Không có email nào trong hộp thư.",
-                "message_format": "text"
+                "message_format": "HTML",
+                "inline_keyboard": [
+                    [
+                        {"text": "📩 Đọc email", "callback_data": f"email_read_{job.job_id}"},
+                        {"text": "ℹ️ Thông tin email", "callback_data": f"email_info_{job.job_id}"},
+                    ],
+                ],
             }
         
         # Format danh sách email

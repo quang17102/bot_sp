@@ -27,6 +27,24 @@ _email_cache: dict[str, list] = {}
 _email_creds: dict[str, dict[str, str]] = {}
 
 
+def _empty_inbox_reply_markup(job_id: str) -> InlineKeyboardMarkup:
+    """Khi hộp thư trống: vẫn cho đọc lại inbox + xem thông tin đăng nhập."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    text="📩 Đọc email",
+                    callback_data=f"email_read_{job_id}",
+                ),
+                InlineKeyboardButton(
+                    text="ℹ️ Thông tin email",
+                    callback_data=f"email_info_{job_id}",
+                ),
+            ]
+        ]
+    )
+
+
 def _escape(v) -> str:
     return html.escape(str(v or ""))
 
@@ -58,9 +76,14 @@ def format_order_like_form(order: dict) -> str:
         if desc:
             status_text = desc
     total_money = checkmvd.format_money_for_total(order.get("final_total"))
-    # Nếu trạng thái bị hủy -> có dòng đỏ "Hủy đơn" giống ảnh (đơn giản theo keyword)
-    s_lower = str(status_text).lower()
-    is_cancel = ("huy" in s_lower) or ("hoan tra" in s_lower) or ("hoan tien" in s_lower) or ("da huy" in s_lower)
+    # Nếu trạng thái bị hủy -> có dòng đỏ "Hủy đơn" (so khớp sau khi bỏ dấu — trạng thái có thể là tiếng Việt có dấu)
+    s_fold = checkmvd.fold_vietnamese(str(status_text).lower())
+    is_cancel = (
+        ("huy" in s_fold)
+        or ("hoan tra" in s_fold)
+        or ("hoan tien" in s_fold)
+        or ("da huy" in s_fold)
+    )
     # Build UI text giống form — các trường quan trọng bọc <code> để copy nhanh
     lines = []
     lines.append(f"🧾 <b>Đơn #{_escape(order_id)}</b>")
@@ -238,6 +261,13 @@ async def check_job_status(chat_id: int, job_id: str, job_queue: JobQueue, bot_a
                         _email_creds[job_id] = {"email": em, "password": pw}
             except Exception:
                 pass
+
+            # /checkmail: luôn lưu email|password từ job (kể cả inbox rỗng) để callback email_read / email_info hoạt động
+            if job.job_type == "checkmail" and isinstance(job.data, dict):
+                em = (job.data.get("email") or "").strip()
+                pw = (job.data.get("password") or "").strip()
+                if em and pw:
+                    _email_creds[job_id] = {"email": em, "password": pw}
             
             # N\u1EBFu c\u00F3 buttons (checkmail command)
             if has_buttons:
@@ -273,7 +303,7 @@ async def check_job_status(chat_id: int, job_id: str, job_queue: JobQueue, bot_a
                     await bot_app.bot.send_message(
                         chat_id=chat_id,
                         text=message,
-                        parse_mode='HTML'
+                        parse_mode='HTML',
                     )
             elif message_format == "HTML":
                 # N\u1EBFu message \u0111\u00E3 \u0111\u01B0\u1EE3c format HTML trong worker
@@ -689,6 +719,7 @@ async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 await query.edit_message_text(
                     text="📭 Không có email nào trong hộp thư.",
                     parse_mode="HTML",
+                    reply_markup=_empty_inbox_reply_markup(job_id),
                 )
             except BadRequest as e:
                 if "Message is not modified" in str(e):
@@ -749,6 +780,7 @@ async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 await query.edit_message_text(
                     text="📭 Không có email nào trong hộp thư.",
                     parse_mode="HTML",
+                    reply_markup=_empty_inbox_reply_markup(job_id),
                 )
             except BadRequest as e:
                 if "Message is not modified" in str(e):
@@ -785,12 +817,15 @@ async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             emails = _email_cache[job_id]
             list_message = email_utils.format_emails_list(emails)
             
-            # Tạo lại buttons cho danh sách
-            button_rows = email_utils.create_email_buttons(len(emails), job_id)
-            keyboard = []
-            for row in button_rows:
-                keyboard.append([InlineKeyboardButton(**btn) for btn in row])
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            if not emails:
+                reply_markup = _empty_inbox_reply_markup(job_id)
+            else:
+                # Tạo lại buttons cho danh sách
+                button_rows = email_utils.create_email_buttons(len(emails), job_id)
+                keyboard = []
+                for row in button_rows:
+                    keyboard.append([InlineKeyboardButton(**btn) for btn in row])
+                reply_markup = InlineKeyboardMarkup(keyboard)
             
             try:
                 await query.edit_message_text(
