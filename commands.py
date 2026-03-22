@@ -524,6 +524,43 @@ async def mailfree_command(update: Update, context: ContextTypes.DEFAULT_TYPE, j
     )
 
 
+async def newmail_command(update: Update, context: ContextTypes.DEFAULT_TYPE, job_queue: JobQueue, bot_app: 'Application'):
+    """
+    /newmail — đăng ký inbox mới qua register_email_full (random local + password),
+    không cần tham số và không cần proxy. Có nút Đọc email / Thông tin email.
+    """
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat.id
+
+    job_id = job_queue.add_job_if_no_active(
+        job_type="newmail",
+        user_id=user_id,
+        chat_id=chat_id,
+        data={},
+    )
+
+    if job_id is None:
+        active_job = job_queue.get_active_job_for_user(user_id, job_type="newmail")
+        if active_job:
+            status_text = "đang chờ" if active_job.status == "pending" else "đang xử lý"
+            await update.message.reply_text(
+                f"⏸️ Bạn đã có job đang {status_text}!\n"
+                f"📋 Job ID: {active_job.job_id[:8]}\n"
+                f"⏳ Trạng thái: {active_job.status}\n"
+                f"Vui lòng đợi job hiện tại hoàn thành trước khi gửi request mới."
+            )
+        else:
+            await update.message.reply_text(
+                "⏸️ Bạn đã có job đang xử lý. Vui lòng đợi job hiện tại hoàn thành."
+            )
+        return
+
+    processing_msg = await update.message.reply_text("⏳ Đang tạo email mới...")
+    asyncio.create_task(
+        check_job_status(chat_id, job_id, job_queue, bot_app, processing_msg.message_id)
+    )
+
+
 async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, bot_app: 'Application', job_queue: JobQueue):
     """Handler cho callback query khi click button email"""
     query = update.callback_query
@@ -1058,6 +1095,9 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
 
     async def mailfree_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await mailfree_command(update, context, job_queue, application)
+
+    async def newmail_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await newmail_command(update, context, job_queue, application)
     
     async def queue_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await queue_status(update, context, job_queue)
@@ -1070,6 +1110,7 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CommandHandler("cks", cks_wrapper))
     application.add_handler(CommandHandler("checkmail", checkmail_wrapper))
     application.add_handler(CommandHandler("mailfree", mailfree_wrapper))
+    application.add_handler(CommandHandler("newmail", newmail_wrapper))
     application.add_handler(CommandHandler("queue", queue_wrapper))
     application.add_handler(CommandHandler("kipx", kipx_command))
     application.add_handler(CommandHandler("vnpx", vnpx_command))

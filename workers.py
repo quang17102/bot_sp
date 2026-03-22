@@ -3,10 +3,12 @@
 Worker handlers cho c\u00e1c lo\u1ea1i job kh\u00e1c nhau
 """
 
+import html
 import time
 from datetime import datetime, timedelta, timezone
 from job_queue import Job
 from typing import Any, Dict
+import email_api
 import login
 import email_utils
 from proxy_storage import get_user_best_proxy
@@ -254,5 +256,51 @@ def handle_mailfree(job: Job) -> Dict[str, Any]:
         return {
             "status": "success",
             "message": "❌ Không add được email free vui lòng thử lại!!!",
+            "message_format": "HTML",
+        }
+
+
+def handle_newmail(job: Job) -> Dict[str, Any]:
+    """
+    /newmail — chỉ gọi register_email_full (email + password random), không gắn Shopee.
+    Không dùng proxy (gọi API trực tiếp như email_api).
+    Trả về nút Đọc email + Thông tin email (cùng callback với checkmail/mailfree).
+    """
+    try:
+        email, password, reg_result = email_api.register_email_full("", "", proxies=None)
+        if not email or not password:
+            if isinstance(reg_result, dict):
+                err_raw = reg_result.get("message") or reg_result.get("error") or str(reg_result)
+            else:
+                err_raw = str(reg_result)
+            err_hint = html.escape(str(err_raw)[:400])
+            return {
+                "status": "success",
+                "message": f"❌ Không tạo được email.\n<code>{err_hint}</code>",
+                "message_format": "HTML",
+            }
+        msg = (
+            "✅ <b>Đã tạo email mới</b>\n\n"
+            f"📧 Email: <code>{html.escape(email)}</code>\n"
+            f"🔑 Password: <code>{html.escape(password)}</code>\n"
+            f"📋 Copy: <code>{html.escape(email)}|{html.escape(password)}</code>\n"
+        )
+        return {
+            "status": "success",
+            "message": msg,
+            "message_format": "HTML",
+            "store_creds": {"email": email, "password": password},
+            "inline_keyboard": [
+                [
+                    {"text": "📩 Đọc email", "callback_data": f"email_read_{job.job_id}"},
+                    {"text": "ℹ️ Thông tin email", "callback_data": f"email_info_{job.job_id}"},
+                ],
+            ],
+        }
+    except Exception as e:
+        print(f"Error in handle_newmail: {e}")
+        return {
+            "status": "success",
+            "message": "❌ Lỗi khi tạo email. Vui lòng thử lại!",
             "message_format": "HTML",
         }
