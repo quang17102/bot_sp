@@ -846,37 +846,69 @@ async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                 raise
     
     elif callback_data.startswith("email_list_"):
-        # Quay lại danh sách email
+        # Quay lại danh sách email (nếu chưa có cache — vd. /newmail → Thông tin → Quay lại — thì fetch inbox trước)
         prefix = "email_list_"
         job_id = callback_data[len(prefix):]
-        
+
+        emails: list | None = None
         if job_id in _email_cache:
             emails = _email_cache[job_id]
-            list_message = email_utils.format_emails_list(emails)
-            
-            if not emails:
-                reply_markup = _empty_inbox_reply_markup(job_id)
-            else:
-                # Tạo lại buttons cho danh sách
-                button_rows = email_utils.create_email_buttons(len(emails), job_id)
-                keyboard = []
-                for row in button_rows:
-                    keyboard.append([InlineKeyboardButton(**btn) for btn in row])
-                reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            try:
-                await query.edit_message_text(
-                    text=list_message,
-                    parse_mode='HTML',
-                    reply_markup=reply_markup
-                )
-            except BadRequest as e:
-                if "Message is not modified" in str(e):
-                    await query.answer("Không có thay đổi.", show_alert=False)
-                else:
-                    raise
         else:
-            await query.answer("Dữ liệu email đã hết hạn. Vui lòng gọi lại /checkmail", show_alert=True)
+            creds = _email_creds.get(job_id) or {}
+            email = (creds.get("email") or "").strip()
+            password = (creds.get("password") or "").strip()
+            if (not email or not password) and job_queue is not None:
+                j = job_queue.get_job(job_id)
+                if j and isinstance(j.data, dict):
+                    email = (j.data.get("email") or "").strip()
+                    password = (j.data.get("password") or "").strip()
+            if not email or not password:
+                try:
+                    await query.edit_message_text(
+                        text="❌ Chưa có dữ liệu inbox. Vui lòng gọi lại <code>/checkmail</code> hoặc <code>/newmail</code>.",
+                        parse_mode="HTML",
+                    )
+                except BadRequest:
+                    pass
+                return
+            result = await asyncio.to_thread(
+                email_utils.get_emails_from_tempmail, email, password
+            )
+            if result.get("status") == "error":
+                err = html.escape(str(result.get("error", "Không xác định")))[:500]
+                try:
+                    await query.edit_message_text(
+                        text=f"❌ Lỗi đọc inbox: <code>{err}</code>",
+                        parse_mode="HTML",
+                    )
+                except BadRequest:
+                    pass
+                return
+            emails = result.get("emails", []) or []
+            _email_cache[job_id] = emails
+            _email_creds[job_id] = {"email": email, "password": password}
+
+        list_message = email_utils.format_emails_list(emails)
+        if not emails:
+            reply_markup = _empty_inbox_reply_markup(job_id)
+        else:
+            button_rows = email_utils.create_email_buttons(len(emails), job_id)
+            keyboard = []
+            for row in button_rows:
+                keyboard.append([InlineKeyboardButton(**btn) for btn in row])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+        try:
+            await query.edit_message_text(
+                text=list_message,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                await query.answer("Không có thay đổi.", show_alert=False)
+            else:
+                raise
     
     elif callback_data.startswith("email_info_"):
         # Hiển thị thông tin mail (email/pass) theo format chuẩn
@@ -888,10 +920,13 @@ async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         password = (creds.get("password") or "").strip()
 
         if not email or not password:
-            await query.answer(
-                "Không có thông tin mail. Vui lòng gọi lại /checkmail hoặc /mailfree.",
-                show_alert=True,
-            )
+            try:
+                await query.edit_message_text(
+                    text="❌ Không có thông tin mail. Vui lòng gọi lại <code>/checkmail</code>, <code>/mailfree</code> hoặc <code>/newmail</code>.",
+                    parse_mode="HTML",
+                )
+            except BadRequest:
+                pass
             return
 
         info_text = (
