@@ -8,6 +8,7 @@ import html
 import io
 import re
 import spx
+import ghn
 import checkmvd
 import asyncio
 from datetime import datetime, timezone
@@ -1341,6 +1342,144 @@ async def spx_tracking_message_handler(update: Update, context: ContextTypes.DEF
     )
 
 
+def build_ghn_inline_keyboard(ghn_order_code: str, *, expanded: bool) -> InlineKeyboardMarkup:
+    """Nút GHN: chi tiết/thu gọn, làm mới, thống kê, hướng dẫn, theo dõi."""
+    detail_btn = InlineKeyboardButton(
+        "📜 Thu gọn" if expanded else "📜 Xem lịch sử chi tiết",
+        callback_data=f"ghn_c|{ghn_order_code}" if expanded else f"ghn_d|{ghn_order_code}",
+    )
+    return InlineKeyboardMarkup(
+        [
+            [detail_btn, InlineKeyboardButton("🔄 Làm mới", callback_data=f"ghn_r|{ghn_order_code}")],
+            [
+                InlineKeyboardButton("📊 Thống kê", callback_data=f"ghn_s|{ghn_order_code}"),
+                InlineKeyboardButton("❓ Hướng dẫn", callback_data=f"ghn_h|{ghn_order_code}"),
+            ],
+            [InlineKeyboardButton("🚩 Theo dõi liên tục", callback_data=f"ghn_w|{ghn_order_code}")],
+        ]
+    )
+
+
+async def ghn_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback inline GHN: chi tiết / thu gọn / làm mới (các nút khác báo đang phát triển)."""
+    q = update.callback_query
+    if not q or not q.data:
+        return
+
+    data_cb = q.data
+    if not re.match(r"^ghn_[dcrshw]\|", data_cb):
+        return
+
+    parts = data_cb.split("|", 1)
+    if len(parts) != 2:
+        await q.answer()
+        return
+    action, ghn_order_code = parts[0], parts[1]
+
+    if action in ("ghn_s", "ghn_h", "ghn_w"):
+        await q.answer("Tính năng đang phát triển.", show_alert=True)
+        return
+
+    async def _fetch():
+        return await asyncio.to_thread(ghn.get_ghn_tracking_logs, ghn_order_code)
+
+    if action in ("ghn_r", "ghn_c"):
+        try:
+            payload, api_err = await _fetch()
+        except Exception as exc:
+            await q.answer(f"Lỗi: {exc}", show_alert=True)
+            return
+        if payload is None:
+            await q.answer(api_err or "Lỗi không xác định", show_alert=True)
+            return
+
+        summary = ghn.format_ghn_summary_html(payload, order_code=ghn_order_code)
+        if api_err:
+            summary += f"\n\n⚠️ {_escape(api_err)}"
+
+        try:
+            await q.edit_message_text(
+                summary,
+                parse_mode="HTML",
+                reply_markup=build_ghn_inline_keyboard(ghn_order_code, expanded=False),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+        await q.answer()
+        return
+
+    if action == "ghn_d":
+        try:
+            payload, api_err = await _fetch()
+        except Exception as exc:
+            await q.answer(f"Lỗi: {exc}", show_alert=True)
+            return
+        if payload is None:
+            await q.answer(api_err or "Lỗi không xác định", show_alert=True)
+            return
+
+        suffix = f"\n\n⚠️ {_escape(api_err)}" if api_err else ""
+        reserve = len(suffix)
+        max_body = max(1, ghn.TELEGRAM_MAX_MESSAGE_CHARS - reserve)
+        body = ghn.format_ghn_delivery_history(payload, max_chars=max_body)
+        text = _escape(body)
+
+        try:
+            await q.edit_message_text(
+                text + suffix,
+                parse_mode="HTML",
+                reply_markup=build_ghn_inline_keyboard(ghn_order_code, expanded=True),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+        await q.answer()
+        return
+
+    await q.answer()
+
+
+async def ghn_tracking_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Tin nhắn text dạng `G` + đúng 8 ký tự (vd. GY4RPCNV) → tra API và trả tóm tắt + nút.
+    """
+    msg = update.effective_message
+    if not msg or not msg.text:
+        return
+
+    ghn_order_code = msg.text.strip()
+    if not (ghn_order_code and len(ghn_order_code) == 8 and ghn_order_code[0].upper() == "G"):
+        return
+
+    try:
+        data, api_err = await asyncio.to_thread(ghn.get_ghn_tracking_logs, ghn_order_code)
+    except Exception as exc:
+        await msg.reply_text(
+            f"❌ Lỗi khi gọi API: {_escape(exc)}",
+            reply_to_message_id=msg.message_id,
+        )
+        return
+
+    if data is None:
+        await msg.reply_text(
+            f"❌ {api_err or 'Lỗi không xác định'}",
+            reply_to_message_id=msg.message_id,
+        )
+        return
+
+    summary = ghn.format_ghn_summary_html(data, order_code=ghn_order_code)
+    if api_err:
+        summary += f"\n\n⚠️ {_escape(api_err)}"
+
+    await msg.reply_text(
+        summary,
+        parse_mode="HTML",
+        reply_markup=build_ghn_inline_keyboard(ghn_order_code, expanded=False),
+        reply_to_message_id=msg.message_id,
+    )
+
+
 def setup_commands(application: 'Application', job_queue: JobQueue):
     """
     \u0110\u0103ng k\u00FD t\u1EA5t c\u1EA3 c\u00E1c command handlers v\u1EDBi application
@@ -1377,6 +1516,9 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     async def spx_callback_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await spx_callback_handler(update, context)
 
+    async def ghn_callback_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await ghn_callback_handler(update, context)
+
     # Tin nhắn bắt đầu bằng SPX → lịch sử giao hàng (không phải lệnh /...)
     spx_text_filter = (
         filters.TEXT
@@ -1385,6 +1527,13 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     )
 
     # \u0110\u0103ng k\u00FD handlers
+    # Tin nhắn bắt đầu bằng G và có đúng 8 ký tự → GHN tracking (vd. GY4RPCNV)
+    ghn_text_filter = (
+        filters.TEXT
+        & ~filters.COMMAND
+        & filters.Regex(re.compile(r"^G[A-Za-z0-9]{7}$"))
+    )
+
     application.add_handler(CommandHandler("cvc", cvc_wrapper))
     application.add_handler(CommandHandler("cks", cks_wrapper))
     application.add_handler(CommandHandler("qr", qr_wrapper))
@@ -1398,4 +1547,6 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CallbackQueryHandler(email_callback_wrapper, pattern="^email_"))
     application.add_handler(CallbackQueryHandler(spx_callback_wrapper, pattern=r"^spx_[dcrshw]\|"))
     application.add_handler(MessageHandler(spx_text_filter, spx_tracking_message_handler))
+    application.add_handler(CallbackQueryHandler(ghn_callback_wrapper, pattern=r"^ghn_[dcrshw]\|"))
+    application.add_handler(MessageHandler(ghn_text_filter, ghn_tracking_message_handler))
 
