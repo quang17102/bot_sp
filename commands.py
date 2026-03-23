@@ -6,12 +6,20 @@ T\u1EA5t c\u1EA3 c\u00E1c command handlers \u0111\u01B0\u1EE3c \u0111\u1ECBnh ng
 import base64
 import html
 import io
+import re
+import spx
 import checkmvd
 import asyncio
 from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
-from telegram.ext import CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 from job_queue import JobQueue
 from typing import TYPE_CHECKING
 import email_utils
@@ -1169,6 +1177,170 @@ async def delpx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def build_spx_inline_keyboard(spx_tn: str, *, expanded: bool) -> InlineKeyboardMarkup:
+    """Nút SPX: chi tiết/thu gọn, làm mới, thống kê, hướng dẫn, theo dõi."""
+    detail_btn = InlineKeyboardButton(
+        "📜 Thu gọn" if expanded else "📜 Xem lịch sử chi tiết",
+        callback_data=f"spx_c|{spx_tn}" if expanded else f"spx_d|{spx_tn}",
+    )
+    return InlineKeyboardMarkup(
+        [
+            [detail_btn, InlineKeyboardButton("🔄 Làm mới", callback_data=f"spx_r|{spx_tn}")],
+            [
+                InlineKeyboardButton("📊 Thống kê", callback_data=f"spx_s|{spx_tn}"),
+                InlineKeyboardButton("❓ Hướng dẫn", callback_data=f"spx_h|{spx_tn}"),
+            ],
+            [InlineKeyboardButton("🚩 Theo dõi liên tục", callback_data=f"spx_w|{spx_tn}")],
+        ]
+    )
+
+
+async def spx_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback inline SPX: chi tiết / thu gọn / làm mới / stub các nút còn lại."""
+    q = update.callback_query
+    if not q or not q.data:
+        return
+
+    data_cb = q.data
+    if not re.match(r"^spx_[dcrshw]\|", data_cb):
+        return
+
+    parts = data_cb.split("|", 1)
+    if len(parts) != 2:
+        await q.answer()
+        return
+    action, spx_tn = parts[0], parts[1]
+
+    if action in ("spx_s", "spx_h", "spx_w"):
+        await q.answer("Tính năng đang phát triển.", show_alert=True)
+        return
+
+    async def _fetch():
+        return await asyncio.to_thread(spx.get_order_info_spx, spx_tn)
+
+    if action == "spx_r":
+        try:
+            payload, api_err = await _fetch()
+        except Exception as exc:
+            await q.answer(f"Lỗi: {exc}", show_alert=True)
+            return
+        if payload is None:
+            await q.answer(api_err or "Lỗi không xác định", show_alert=True)
+            return
+        summary = spx.format_spx_summary_html(payload, spx_tn=spx_tn)
+        if api_err:
+            summary += f"\n\n⚠️ {_escape(api_err)}"
+        try:
+            await q.edit_message_text(
+                summary,
+                parse_mode="HTML",
+                reply_markup=build_spx_inline_keyboard(spx_tn, expanded=False),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+        await q.answer()
+        return
+
+    if action == "spx_d":
+        try:
+            payload, api_err = await _fetch()
+        except Exception as exc:
+            await q.answer(f"Lỗi: {exc}", show_alert=True)
+            return
+        if payload is None:
+            await q.answer(api_err or "Lỗi không xác định", show_alert=True)
+            return
+        suffix = f"\n\n⚠️ {_escape(api_err)}" if api_err else ""
+        reserve = len(suffix)
+        max_body = max(1, spx.TELEGRAM_MAX_MESSAGE_CHARS - reserve)
+        body = spx.format_spx_delivery_history(payload, max_chars=max_body)
+        text = _escape(body)
+        try:
+            await q.edit_message_text(
+                text + suffix,
+                parse_mode="HTML",
+                reply_markup=build_spx_inline_keyboard(spx_tn, expanded=True),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+        await q.answer()
+        return
+
+    if action == "spx_c":
+        try:
+            payload, api_err = await _fetch()
+        except Exception as exc:
+            await q.answer(f"Lỗi: {exc}", show_alert=True)
+            return
+        if payload is None:
+            await q.answer(api_err or "Lỗi không xác định", show_alert=True)
+            return
+        summary = spx.format_spx_summary_html(payload, spx_tn=spx_tn)
+        if api_err:
+            summary += f"\n\n⚠️ {_escape(api_err)}"
+        try:
+            await q.edit_message_text(
+                summary,
+                parse_mode="HTML",
+                reply_markup=build_spx_inline_keyboard(spx_tn, expanded=False),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+        await q.answer()
+        return
+
+    await q.answer()
+
+
+async def spx_tracking_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Tin nhắn text bắt đầu bằng SPX (vd. SPXVN...) → tra API và trả tóm tắt + nút,
+    reply ngay tại tin nhắn đó.
+    """
+    msg = update.effective_message
+    if not msg or not msg.text:
+        return
+
+    spx_tn = spx.extract_spx_tracking_from_text(msg.text)
+    if not spx_tn:
+        await msg.reply_text(
+            "❌ Không đọc được mã vận đơn. Gửi dạng: <code>SPXVN...</code>",
+            parse_mode="HTML",
+            reply_to_message_id=msg.message_id,
+        )
+        return
+
+    try:
+        data, api_err = await asyncio.to_thread(spx.get_order_info_spx, spx_tn)
+    except Exception as exc:
+        await msg.reply_text(
+            f"❌ Lỗi khi gọi API: {_escape(exc)}",
+            reply_to_message_id=msg.message_id,
+        )
+        return
+
+    if data is None:
+        await msg.reply_text(
+            f"❌ {api_err or 'Lỗi không xác định'}",
+            reply_to_message_id=msg.message_id,
+        )
+        return
+
+    summary = spx.format_spx_summary_html(data, spx_tn=spx_tn)
+    if api_err:
+        summary += f"\n\n⚠️ {_escape(api_err)}"
+
+    await msg.reply_text(
+        summary,
+        parse_mode="HTML",
+        reply_markup=build_spx_inline_keyboard(spx_tn, expanded=False),
+        reply_to_message_id=msg.message_id,
+    )
+
+
 def setup_commands(application: 'Application', job_queue: JobQueue):
     """
     \u0110\u0103ng k\u00FD t\u1EA5t c\u1EA3 c\u00E1c command handlers v\u1EDBi application
@@ -1201,7 +1373,17 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     
     async def email_callback_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await email_callback_handler(update, context, application, job_queue)
-    
+
+    async def spx_callback_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await spx_callback_handler(update, context)
+
+    # Tin nhắn bắt đầu bằng SPX → lịch sử giao hàng (không phải lệnh /...)
+    spx_text_filter = (
+        filters.TEXT
+        & ~filters.COMMAND
+        & filters.Regex(re.compile(r"^SPX", re.IGNORECASE))
+    )
+
     # \u0110\u0103ng k\u00FD handlers
     application.add_handler(CommandHandler("cvc", cvc_wrapper))
     application.add_handler(CommandHandler("cks", cks_wrapper))
@@ -1214,4 +1396,6 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CommandHandler("vnpx", vnpx_command))
     application.add_handler(CommandHandler("delpx", delpx_command))
     application.add_handler(CallbackQueryHandler(email_callback_wrapper, pattern="^email_"))
+    application.add_handler(CallbackQueryHandler(spx_callback_wrapper, pattern=r"^spx_[dcrshw]\|"))
+    application.add_handler(MessageHandler(spx_text_filter, spx_tracking_message_handler))
 
