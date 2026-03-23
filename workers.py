@@ -4,6 +4,7 @@ Worker handlers cho c\u00e1c lo\u1ea1i job kh\u00e1c nhau
 """
 
 import html
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from job_queue import Job
@@ -12,6 +13,12 @@ import email_api
 import login
 import login_qr
 import email_utils
+import voucher_status
+from voucher_status import (
+    VOUCHER_BATCH_LIST_HARDCODED,
+    fetch_voucher_batch_parallel,
+    format_batch_cards_telegram_html,
+)
 from proxy_storage import get_user_best_proxy
 from email_utils import process_mailfree
 
@@ -92,38 +99,55 @@ def _format_cks_success_from_user_info(
 
 def handle_cvc(job: Job) -> Dict[str, Any]:
     """
-    Handler \u0111\u1ec3 x\u1eed l\u00fd command /cvc - gi\u1ea3 l\u1eadp x\u1eed l\u00fd m\u1ea5t 20 gi\u00e2y
-    
-    D\u1eef li\u1ec7u t\u1eeb context \u0111\u01b0\u1ee3c truy\u1ec1n v\u00e0o job.data khi t\u1ea1o job trong cvc_command
-    Worker tr\u1ea3 v\u1ec1 result, v\u00e0 check_job_status s\u1ebd g\u1eedi message cho user
+    Handler cho /cvc — gọi API voucher mall (đa luồng) với danh sách hardcode
+    ``VOUCHER_BATCH_LIST_HARDCODED`` trong ``voucher_status.py``, hiển thị thẻ voucher (HTML).
+    Cookie mall: biến môi trường ``SHOPEE_MALL_COOKIE`` (có thể rỗng).
+    **Không dùng proxy** — luôn gọi trực tiếp (check voucher).
     """
-    # L\u1ea5y d\u1eef li\u1ec7u t\u1eeb job.data (\u0111\u01b0\u1ee3c truy\u1ec1n t\u1eeb context trong cvc_command)
-    input_data = job.data.get("input")  # L\u1ea5y tham s\u1ed1 \u0111\u1ea7u ti\u00ean t\u1eeb context.args
-    args = job.data.get("args", [])  # L\u1ea5y to\u00e0n b\u1ed9 args t\u1eeb context.args
-    
-    # C\u00f3 th\u1ec3 truy c\u1eadp c\u00e1c th\u00f4ng tin kh\u00e1c t\u1eeb job
-    user_id = job.user_id  # User ID t\u1eeb update.message.from_user.id
-    chat_id = job.chat_id  # Chat ID t\u1eeb update.message.chat.id
-    
-    # V\u00ed d\u1ee5: X\u1eed l\u00fd d\u1eef li\u1ec7u \u0111\u1ea7u v\u00e0o
-    if input_data:
-        # X\u1eed l\u00fd v\u1edbi input_data
-        processed_message = f"Hello, b\u1ea1n \u0111\u00e3 g\u1eedi: {input_data}"
-    else:
-        processed_message = "Hello"
-    
-    # Gi\u1ea3 l\u1eadp x\u1eed l\u00fd m\u1ea5t 20 gi\u00e2y (blocking operation)
-    time.sleep(20)
+    user_id = job.user_id
+    chat_id = job.chat_id
+    input_data = job.data.get("input")
+    args = job.data.get("args", [])
 
-    # Tr\u1ea3 v\u1ec1 k\u1ebft qu\u1ea3 \u0111\u1ec3 check_job_status g\u1eedi message cho user
-    return {
-        "status": "success",
-        "message": processed_message,
-        "user_id": user_id,
-        "chat_id": chat_id,
-        "input_received": input_data,  # Tr\u1ea3 v\u1ec1 d\u1eef li\u1ec7u \u0111\u00e3 nh\u1eadn
-        "all_args": args  # Tr\u1ea3 v\u1ec1 t\u1ea5t c\u1ea3 args
-    }
+    try:
+        cookie = os.getenv("SHOPEE_MALL_COOKIE", "").strip()
+        items = list(VOUCHER_BATCH_LIST_HARDCODED)
+        if not items:
+            return {
+                "status": "success",
+                "message": "❌ <b>VOUCHER_BATCH_LIST_HARDCODED</b> đang rỗng — thêm voucher trong <code>voucher_status.py</code>.",
+                "message_format": "HTML",
+            }
+
+        n = len(items)
+        workers = min(voucher_status.DEFAULT_BATCH_WORKERS, max(1, n))
+        rows = fetch_voucher_batch_parallel(
+            items,
+            cookie=cookie,
+            max_workers=workers,
+            proxies=None,
+        )
+        msg = format_batch_cards_telegram_html(rows)
+        return {
+            "status": "success",
+            "message": msg,
+            "message_format": "HTML",
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "input_received": input_data,
+            "all_args": args,
+        }
+    except Exception as e:
+        print(f"Error handle_cvc: {e}")
+        return {
+            "status": "success",
+            "message": f"❌ Lỗi /cvc: {html.escape(str(e))}",
+            "message_format": "HTML",
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "input_received": input_data,
+            "all_args": args,
+        }
 
 def handle_cks(job: Job) -> Dict[str, Any]:
     input_data = job.data.get("input")  # L\u1ea5y tham s\u1ed1 \u0111\u1ea7u ti\u00ean t\u1eeb context.args
