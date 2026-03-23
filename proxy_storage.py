@@ -172,6 +172,7 @@ def get_user_best_proxy(user_id: int) -> Tuple[Optional[Dict[str, str]], Optiona
                     formatted[k] = v_str
                 else:
                     formatted[k] = f"http://{v_str}"
+            return formatted, "kiot"
 
     # 2. VNProxy (proxyxoay) với cơ chế cache proxy thực tế
     vn_key = user_map.get("vnpx")           # API key proxyxoay do /vnpx lưu
