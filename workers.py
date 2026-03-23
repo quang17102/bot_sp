@@ -10,6 +10,7 @@ from job_queue import Job
 from typing import Any, Dict
 import email_api
 import login
+import login_qr
 import email_utils
 from proxy_storage import get_user_best_proxy
 from email_utils import process_mailfree
@@ -55,6 +56,38 @@ def _format_created_display(created_raw: Any) -> str:
     except Exception:
         pass
     return s
+
+
+def _format_cks_success_from_user_info(
+    user_info: dict,
+    proxies: dict,
+    proxy_label: str,
+) -> Dict[str, Any]:
+    """Payload giống handle_cks khi đã có user_info + proxy."""
+
+    def format_copyable(value: str) -> str:
+        if not value or value == "None":
+            return "None"
+        return f"<code>{value}</code>"
+
+    cookie_text = f"SPC_ST={user_info['spc_st']}"
+    message_html = (
+        "✅ Nhấn vô Cookies để COPY\n\n"
+        f"<code>{cookie_text}</code>\n\n"
+        "<b>📋 Thông Tin Tài Khoản:</b>\n"
+        f"• Username: {format_copyable(user_info['username'])}\n"
+        f"• Email: {format_copyable(user_info['email'])}\n"
+        f"• Phone: {format_copyable(user_info['phone'])}\n"
+        f"• Ngày tạo: {format_copyable(_format_created_display(user_info.get('created')))}"
+    )
+    return {
+        "status": "success",
+        "message": message_html,
+        "message_format": "HTML",
+        "store_creds": cookie_text,
+        "proxies": proxies,
+        "proxy_source": proxy_label,
+    }
 
 
 def handle_cvc(job: Job) -> Dict[str, Any]:
@@ -115,32 +148,21 @@ def handle_cks(job: Job) -> Dict[str, Any]:
             }
         # Extract SPC_ST từ input (dùng proxy nếu có)
         user_info = login.extract_spc_st_and_user_info(input_data, proxies=proxies, device_id="123")
-        
-        def format_copyable(value: str) -> str:
-            if not value or value == "None":
-                return "None"
-            return f"<code>{value}</code>"
+        if isinstance(user_info, str):
+            return {
+                "status": "success",
+                "message": user_info,
+                "message_format": "HTML",
+            }
+        if not isinstance(user_info, dict) or not user_info.get("spc_st"):
+            return {
+                "status": "success",
+                "message": "❌: Lấy cookie thất bại vui lòng thử lại",
+                "message_format": "HTML",
+            }
 
         proxy_label = proxy_source or "unknown"
-        cookie_text = f"SPC_ST={user_info['spc_st']}"
-        message_html = (
-            "✅ Nhấn vô Cookies để COPY\n\n"
-            f"<code>{cookie_text}</code>\n\n"
-            "<b>📋 Thông Tin Tài Khoản:</b>\n"
-            f"• Username: {format_copyable(user_info['username'])}\n"
-            f"• Email: {format_copyable(user_info['email'])}\n"
-            f"• Phone: {format_copyable(user_info['phone'])}\n"
-            f"• Ngày tạo: {format_copyable(_format_created_display(user_info.get('created')))}"
-        )
-        return {
-            "status": "success",
-            "message": message_html,
-            "message_format": "HTML",
-            "store_creds": cookie_text,
-            # Cùng dict proxy dùng cho login — truyền tiếp sang collect_orders (checkmvd)
-            "proxies": proxies,
-            "proxy_source": proxy_label,
-        }
+        return _format_cks_success_from_user_info(user_info, proxies, proxy_label)
     except Exception as e:
         print(f"Error: {e}")
         return {
@@ -148,6 +170,90 @@ def handle_cks(job: Job) -> Dict[str, Any]:
                     "message": "\u274c: Lấy cookie thất bại vui lòng thử lại",  # Message \u0111\u00e3 format HTML
                     "message_format": "HTML"  # \u0110\u00e1nh d\u1ea5u l\u00e0 HTML format
                 }
+
+
+def handle_qr(job: Job) -> Dict[str, Any]:
+    """
+    Poll get_qr_status theo qrcode_id; khi CONFIRMED thì login_with_qr
+    và trả về cùng format handle_cks (cookie + thông tin + proxies cho collect_orders).
+    """
+    qrcode_id = (job.data or {}).get("qrcode_id")
+    if not qrcode_id:
+        return {
+            "status": "success",
+            "message": "❌ Thiếu qrcode_id (lỗi dữ liệu job).",
+            "message_format": "HTML",
+        }
+    user_id = job.user_id
+    poll_interval = 2
+    max_wait = 180
+    started = time.time()
+
+    while True:
+        if time.time() - started > max_wait:
+            return {
+                "status": "success",
+                "message": "❌ Hết thời gian chờ quét QR (3 phút).",
+                "message_format": "HTML",
+            }
+
+        status_result = login_qr.get_qr_status(qrcode_id)
+        if status_result.get("status") != "success":
+            err = status_result.get("message", "unknown")
+            return {
+                "status": "success",
+                "message": f"❌ Lỗi kiểm tra QR: {html.escape(str(err))}",
+                "message_format": "HTML",
+            }
+
+        data = status_result.get("data") or {}
+        qr_status = (data.get("status") or "").upper()
+        qrcode_token = data.get("qrcode_token", "")
+
+        if qr_status == "CONFIRMED":
+            if not qrcode_token:
+                return {
+                    "status": "success",
+                    "message": "❌ QR đã xác nhận nhưng thiếu token.",
+                    "message_format": "HTML",
+                }
+            login_result = login_qr.login_with_qr(qrcode_token)
+            if login_result.get("status") != "success":
+                msg = login_result.get("message", "Đăng nhập QR thất bại")
+                return {
+                    "status": "success",
+                    "message": f"❌ {html.escape(str(msg))}",
+                    "message_format": "HTML",
+                }
+            cookies = login_result.get("cookies") or {}
+            spc_st = cookies.get("SPC_ST")
+            if not spc_st:
+                return {
+                    "status": "success",
+                    "message": "❌ Không lấy được SPC_ST sau đăng nhập QR.",
+                    "message_format": "HTML",
+                }
+            proxies, proxy_source = get_user_best_proxy(user_id)
+            if proxies is None or proxies == {}:
+                return {
+                    "status": "success",
+                    "message": "❌ Vui lòng kiểm tra proxy nhé!!!",
+                    "message_format": "HTML",
+                }
+            user_info = login.build_user_info_dict_from_spc_st(
+                spc_st, proxies=proxies, device_id="123"
+            )
+            if not user_info or not user_info.get("spc_st"):
+                return {
+                    "status": "success",
+                    "message": "❌ Không lấy được thông tin tài khoản",
+                    "message_format": "HTML",
+                }
+            proxy_label = proxy_source or "unknown"
+            return _format_cks_success_from_user_info(user_info, proxies, proxy_label)
+
+        time.sleep(poll_interval)
+
 
 def handle_checkmail(job: Job) -> Dict[str, Any]:
     """

@@ -3,7 +3,9 @@
 Command handlers cho Telegram Bot
 T\u1EA5t c\u1EA3 c\u00E1c command handlers \u0111\u01B0\u1EE3c \u0111\u1ECBnh ngh\u0129a \u1EDF \u0111\u00E2y
 """
+import base64
 import html
+import io
 import checkmvd
 import asyncio
 from datetime import datetime, timezone
@@ -15,6 +17,7 @@ from typing import TYPE_CHECKING
 import email_utils
 from proxy_storage import save_user_proxy_key, get_user_proxy_key, delete_user_proxies
 import verify_mail
+import login_qr
 
 if TYPE_CHECKING:
     from telegram.ext import Application
@@ -215,6 +218,61 @@ async def cks_command(update: Update, context: ContextTypes.DEFAULT_TYPE, job_qu
     asyncio.create_task(check_job_status(chat_id, job_id, job_queue, bot_app, processing_msg_id))
 
 
+async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE, job_queue: JobQueue, bot_app: 'Application'):
+    """Handler cho command /qr — gửi ảnh QR, worker poll đến khi CONFIRMED rồi trả giống /cks."""
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat.id
+
+    gen_result = await asyncio.to_thread(login_qr.gen_qr_login)
+    if gen_result.get("status") != "success":
+        await update.message.reply_text(
+            f"❌ {gen_result.get('message', 'Không tạo được mã QR.')}"
+        )
+        return
+
+    qrcode_base64 = gen_result.get("qrcode_base64")
+    qrcode_id = gen_result.get("qrcode_id")
+    b64_data = qrcode_base64
+    if "," in (qrcode_base64 or "") and (qrcode_base64 or "").startswith("data:image"):
+        b64_data = qrcode_base64.split(",", 1)[1]
+    try:
+        png_bytes = base64.b64decode(b64_data)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Không decode được ảnh QR: {e}")
+        return
+
+    bio = io.BytesIO(png_bytes)
+    bio.name = "qr.png"
+    await update.message.reply_photo(photo=bio)
+
+    job_id = job_queue.add_job_if_no_active(
+        job_type="qr",
+        user_id=user_id,
+        chat_id=chat_id,
+        data={"qrcode_id": qrcode_id},
+    )
+    if job_id is None:
+        active_job = job_queue.get_active_job_for_user(user_id, job_type="qr")
+        if active_job:
+            status_text = "đang chờ" if active_job.status == "pending" else "đang xử lý"
+            await update.message.reply_text(
+                f"⏸️ Bạn đã có job QR đang {status_text}!\n"
+                f"📋 Job ID: {active_job.job_id[:8]}\n"
+                f"⏳ Trạng thái: {active_job.status}\n"
+                "Vui lòng đợi job hiện tại hoàn thành."
+            )
+        else:
+            await update.message.reply_text(
+                "⏸️ Bạn đã có job đang xử lý. Vui lòng đợi hoàn thành."
+            )
+        return
+
+    processing_msg = await update.message.reply_text("⏳ Đang chờ quét QR...")
+    asyncio.create_task(
+        check_job_status(chat_id, job_id, job_queue, bot_app, processing_msg.message_id)
+    )
+
+
 async def check_job_status(chat_id: int, job_id: str, job_queue: JobQueue, bot_app: 'Application', processing_msg_id: int = None):
     """Polling \u0111\u1EC3 check job status v\u00E0 g\u1EEDi k\u1EBFt qu\u1EA3 khi ho\u00E0n th\u00E0nh.
 
@@ -327,7 +385,8 @@ async def check_job_status(chat_id: int, job_id: str, job_queue: JobQueue, bot_a
                     reply_markup=reply_markup,
                 )
                 store_creds = result.get("store_creds")  # cookie_text = "SPC_ST=..."
-            if job.job_type == "cks" and isinstance(store_creds, str) and store_creds.startswith("SPC_ST="):
+            cookie_for_orders = result.get("store_creds")
+            if job.job_type in ("cks", "qr") and isinstance(cookie_for_orders, str) and cookie_for_orders.startswith("SPC_ST="):
                 # chạy lấy đơn trong thread (blocking) — dùng cùng proxy worker đã trả về (login + API đơn)
                 try:
                     print("Lấy đơn")
@@ -336,7 +395,7 @@ async def check_job_status(chat_id: int, job_id: str, job_queue: JobQueue, bot_a
                         order_proxies = None
                     orders = await asyncio.to_thread(
                         checkmvd.collect_orders,
-                        store_creds,      # cookie
+                        cookie_for_orders,      # cookie
                         10,               # page_size
                         15,               # timeout
                         5,                # max_orders
@@ -349,7 +408,7 @@ async def check_job_status(chat_id: int, job_id: str, job_queue: JobQueue, bot_a
                         msg += f"{format_order_like_form(od)}\n\n— — —\n\n"
                     await bot_app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
                 except Exception as e:
-                    print(f"Lỗi lấy đơn (/cks): {e}")
+                    print(f"Lỗi lấy đơn (/cks hoặc /qr): {e}")
                     await bot_app.bot.send_message(
                         chat_id=chat_id,
                         text=(
@@ -1124,6 +1183,9 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     
     async def cks_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cks_command(update, context, job_queue, application)
+
+    async def qr_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await qr_command(update, context, job_queue, application)
     
     async def checkmail_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await checkmail_command(update, context, job_queue, application)
@@ -1143,6 +1205,7 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     # \u0110\u0103ng k\u00FD handlers
     application.add_handler(CommandHandler("cvc", cvc_wrapper))
     application.add_handler(CommandHandler("cks", cks_wrapper))
+    application.add_handler(CommandHandler("qr", qr_wrapper))
     application.add_handler(CommandHandler("checkmail", checkmail_wrapper))
     application.add_handler(CommandHandler("mailfree", mailfree_wrapper))
     application.add_handler(CommandHandler("newmail", newmail_wrapper))

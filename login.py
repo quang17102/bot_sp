@@ -201,6 +201,45 @@ def extract_spc_st_and_user_info(
         # Lỗi chung: trả về message giống workers.py (207–211)
         return {}
 
+
+def build_user_info_dict_from_spc_st(
+    spc_st: str,
+    proxies: dict | None = None,
+    device_id: str | None = None,
+    sc_fe_session: str | None = None,
+    sc_fe_ver: str | None = None,
+) -> dict:
+    """
+    Chuẩn hóa user_info khi đã có SPC_ST (vd. đăng nhập QR), cùng keys với
+    dict trả về từ extract_spc_st_and_user_info khi thành công.
+    """
+    if not (spc_st or "").strip():
+        return {}
+    user_info_api = get_user_info_by_spc_st(
+        spc_st=spc_st,
+        device_id=device_id,
+        sc_fe_session=sc_fe_session,
+        sc_fe_ver=sc_fe_ver,
+        proxies=proxies,
+    )
+    if user_info_api.get("status") == "error":
+        return {}
+    user_info = {
+        "spc_st": spc_st,
+        "username": user_info_api.get("seller_user_info", {})
+        .get("data", {})
+        .get("user_name", ""),
+        "email": user_info_api.get("data", {})
+        .get("data", {})
+        .get("email", ""),
+        "phone": user_info_api.get("data", {})
+        .get("data", {})
+        .get("phone", ""),
+        "created": user_info_api.get("created_at_iso_utc", ""),
+    }
+    return user_info
+
+
 def build_spc_st_cookie(spc_st: str) -> str:
     raw = (spc_st or "").strip()
     if not raw:
