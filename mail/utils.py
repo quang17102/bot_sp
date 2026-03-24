@@ -3,6 +3,7 @@
 Utilities cho việc xử lý email từ TempMail API
 """
 
+import html
 import re
 import requests
 from datetime import datetime, timezone, timedelta
@@ -125,6 +126,57 @@ def parse_time_from_body(body_text: str) -> Optional[str]:
     return None
 
 
+def parse_shopee_otp_from_body(body_text: str) -> Optional[str]:
+    """
+    Trích mã OTP 6 số từ email Shopee (xác minh tài khoản).
+    """
+    if not body_text:
+        return None
+    # Dòng sau: "Mã xác minh tài khoản Shopee của bạn là:"
+    m = re.search(
+        r"Mã xác minh tài khoản Shopee của bạn là:\s*\n\s*(\d{6})\b",
+        body_text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if m:
+        return m.group(1)
+    # Cùng dòng với dấu hai chấm
+    m = re.search(
+        r"Mã xác minh tài khoản Shopee của bạn là:\s*(\d{6})\b",
+        body_text,
+        re.IGNORECASE,
+    )
+    if m:
+        return m.group(1)
+    # Tiếng Anh / biến thể ngắn
+    m = re.search(
+        r"(?:verification|OTP)\s+code\s+is:?\s*\n\s*(\d{6})\b",
+        body_text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if m:
+        return m.group(1)
+    return None
+
+
+def _is_shopee_otp_email(email: Dict[str, Any]) -> bool:
+    """Email OTP Shopee: có mã trong body hoặc gửi từ Shopee + tiêu đề OTP."""
+    subject = (email.get("subject") or "").lower()
+    from_addr = (email.get("from_addr") or "").lower()
+    body_text = email.get("body_text") or ""
+    if parse_shopee_otp_from_body(body_text):
+        return True
+    shopee_sender = "mail.shopee" in from_addr or "shopee.vn" in from_addr
+    otp_subject = (
+        "mã otp" in subject
+        or " otp " in f" {subject} "
+        or subject.endswith(" otp")
+        or subject.startswith("otp ")
+        or ("otp" in subject and "shopee" in subject)
+    )
+    return bool(shopee_sender and otp_subject)
+
+
 def get_email_type_info(email: Dict[str, Any]) -> Dict[str, Any]:
     """Xác định loại email và icon tương ứng"""
     subject = email.get('subject', '').lower()
@@ -135,6 +187,12 @@ def get_email_type_info(email: Dict[str, Any]) -> Dict[str, Any]:
             'type': 'login_warning',
             'icon': '🔒',
             'title': 'Cảnh báo đăng nhập'
+        }
+    elif _is_shopee_otp_email(email):
+        return {
+            'type': 'shopee_otp',
+            'icon': '🔑',
+            'title': email.get('subject', 'Mã OTP Shopee'),
         }
     elif 'xác nhận' in subject or 'confirm' in subject.lower():
         return {
@@ -167,10 +225,28 @@ def format_email_display_for_bot(idx: int, email: Dict[str, Any]) -> str:
     else:
         title = email.get('subject', 'Email')
         # Loại bỏ các emoji/icon có sẵn trong title để tránh duplicate
-        title = re.sub(r'[🎉🔒📧📨]+\s*', '', title).strip()
+        title = re.sub(r'[🎉🔒📧📨🔑]+\s*', '', title).strip()
     
     # Format timestamp
     timestamp = format_timestamp_for_email(email.get('date', ''))
+    
+    # Shopee OTP: 🔑 tiêu đề | 📟 mã | ⏰ giờ + gạch ngăn
+    if email_type_info['type'] == 'shopee_otp':
+        body_text = email.get('body_text', '') or ''
+        otp = parse_shopee_otp_from_body(body_text)
+        title_show = re.sub(r'^(Shopee:\s*)', '', title, flags=re.IGNORECASE).strip() or title
+        title_esc = html.escape(title_show)
+        sep = "━━━━━━━━━━━━━━━━━━━━━━━━"
+        if otp:
+            otp_line = f"   📟 <code>{html.escape(otp)}</code>"
+        else:
+            otp_line = "   📟 <i>Không đọc được mã</i>"
+        return (
+            f"🔑 <b>{idx}. {title_esc}</b>\n"
+            f"{otp_line}\n"
+            f"   ⏰ {html.escape(timestamp)}\n"
+            f"{sep}"
+        )
     
     # Lấy thông tin device, vị trí hoặc from address; giờ xuống dòng với ⏰
     if email_type_info['type'] == 'login_warning':
@@ -384,6 +460,55 @@ def format_email_detail(email: Dict[str, Any]) -> str:
         if verification_link:
             message += f"🔗 <b>Link xác minh:</b> <code>{verification_link}</code>\n"
         
+        return message
+    
+    if email_type_info['type'] == 'shopee_otp':
+        otp = parse_shopee_otp_from_body(body_text)
+        title = email.get('subject', 'Email')
+        title = re.sub(r'[🎉🔒📧📨🔑]+\s*', '', title).strip()
+        title = re.sub(r'^(Shopee:\s*)', '', title, flags=re.IGNORECASE).strip() or title
+        title_esc = html.escape(title)
+        timestamp = format_timestamp_for_email(email.get('date', ''))
+        otp_line = (
+            f"📟 <code>{html.escape(otp)}</code>"
+            if otp
+            else "📟 <i>Không đọc được mã</i>"
+        )
+        message = (
+            f"🔑 <b>{title_esc}</b>\n"
+            f"{otp_line}\n"
+            f"⏰ {html.escape(timestamp)}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+        from_addr = email.get('from_addr', 'N/A')
+        to_addr = email.get('to_addr', 'N/A')
+        size = email.get('size', 0)
+        has_attachments = email.get('has_attachments', False)
+        if size > 1024 * 1024:
+            size_str = f"{size / (1024 * 1024):.2f} MB"
+        elif size > 1024:
+            size_str = f"{size / 1024:.2f} KB"
+        else:
+            size_str = f"{size} bytes"
+        message += f"📧 <b>CHI TIẾT EMAIL:</b>\n\n"
+        message += f"📨 <b>Từ:</b> <code>{html.escape(str(from_addr))}</code>\n"
+        message += f"📬 <b>Đến:</b> <code>{html.escape(str(to_addr))}</code>\n"
+        message += f"🕐 <b>Thời gian:</b> {html.escape(timestamp)}\n"
+        message += f"📏 <b>Kích thước:</b> {html.escape(size_str)}\n"
+        if has_attachments:
+            message += f"📎 <b>Có đính kèm:</b> Có\n"
+        message += f"\n📄 <b>Nội dung:</b>\n"
+        max_body_length = 3500
+        if body_text:
+            preview_text = body_text[:max_body_length]
+            if len(body_text) > max_body_length:
+                preview_text += "\n\n... (nội dung bị cắt)"
+            preview_text = preview_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            message += f"<pre>{preview_text}</pre>"
+        else:
+            message += "Không có nội dung text."
+        if len(message) > 4096:
+            message = message[:4000] + "\n\n... (nội dung quá dài, đã bị cắt)"
         return message
     
     # Format cho các loại email khác
@@ -1062,7 +1187,6 @@ def process_mailfree(
 
     # Tạo email free (random local_part + password) (dùng proxy)
     email, email_password, reg_result = api.register_email_full("", "", proxies=proxies)
-    print(f"reg_result:{reg_result}")
     if not email or not email_password:
         return {
             "status": "success",
