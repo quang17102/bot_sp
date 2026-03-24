@@ -7,8 +7,7 @@ import base64
 import html
 import io
 import re
-import spx
-import ghn
+from shipping import spx, ghn
 import checkmvd
 import asyncio
 from datetime import datetime, timezone
@@ -22,10 +21,16 @@ from telegram.ext import (
     filters,
 )
 from job_queue import JobQueue
-from typing import TYPE_CHECKING
-import email_utils
-from proxy_storage import save_user_proxy_key, get_user_proxy_key, delete_user_proxies
-import verify_mail
+from typing import TYPE_CHECKING, Optional
+from mail import utils as email_utils
+from mail.verify import verify_link
+from proxy_storage import (
+    save_user_proxy_key,
+    get_user_proxy_key,
+    delete_user_proxies,
+    get_user_best_proxy,
+)
+import login
 import login_qr
 
 if TYPE_CHECKING:
@@ -750,7 +755,7 @@ async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                         # Hiển thị thông báo đang xử lý
                         await query.answer("Đang xử lý...", show_alert=False)
 
-                        # Dùng verify_mail.py (Playwright) thay cho call_verification_link
+                        # Dùng mail.verify (Playwright) thay cho call_verification_link
                         chat_id = query.message.chat_id
                         read_btn = InlineKeyboardButton(
                             text="📩 Đọc Mail",
@@ -768,7 +773,7 @@ async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                         # Chạy verify ngầm (không chặn handler).
                         async def _background_verify() -> None:
                             try:
-                                await asyncio.to_thread(verify_mail.verify_link, verification_link)
+                                await asyncio.to_thread(verify_link, verification_link)
                             except Exception as e:
                                 # Không thông báo lại UI để đúng yêu cầu "hiển thị thành công ngay".
                                 print(e)
@@ -1178,6 +1183,145 @@ async def delpx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def vc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Lưu batch voucher mall: ``user|pass|sdt|SPC_F=...`` → lấy SPC_ST qua proxy,
+    hoặc ``SPC_ST=...`` / chỉ giá trị SPC_ST. Gọi ``save_voucher_batch`` với
+    ``VOUCHER_BATCH_LIST_HARDCODED`` (proxy bắt buộc).
+    """
+    if not update.message:
+        return
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("❌ Không lấy được thông tin user.")
+        return
+
+    user_id = user.id
+    raw = " ".join(context.args or []).strip()
+    if not raw:
+        await update.message.reply_text(
+            "❌ Thiếu tham số.\n"
+            "Cú pháp:\n"
+            "<code>/vc user|pass|sdt|SPC_F=...</code>\n"
+            "hoặc <code>/vc SPC_ST=...</code> / chỉ giá trị SPC_ST",
+            parse_mode="HTML",
+        )
+        return
+
+    proxies, _src = get_user_best_proxy(user_id)
+    if not proxies:
+        await update.message.reply_text(
+            "❌ Cần cấu hình proxy (<code>/kipx</code> hoặc <code>/vnpx</code>) trước.",
+            parse_mode="HTML",
+        )
+        return
+
+    chat_id = update.effective_chat.id
+    processing_msg = await update.message.reply_text("⏳ Đang xử lý...")
+
+    try:
+        from save_voucher import format_vc_telegram_html, save_voucher_batch
+        from voucher_status import VOUCHER_BATCH_LIST_HARDCODED
+
+        cookie_header: Optional[str] = None
+
+        if "|" in raw and "SPC_F" in raw.upper():
+            try:
+                spc_st_val = await asyncio.to_thread(login.extract_spc_st, raw, proxies)
+            except ValueError as e:
+                await update.message.reply_text(
+                    "❌ <b>Lấy cookie SPC_ST thất bại</b>\n\n"
+                    f"Định dạng hoặc thiếu trường: {html.escape(str(e))}\n\n"
+                    "<i>Cần đúng:</i> <code>user|pass|sdt|SPC_F=...</code>",
+                    parse_mode="HTML",
+                )
+                return
+            except Exception as e:
+                detail = html.escape(str(e))
+                await update.message.reply_text(
+                    "❌ <b>Lấy cookie SPC_ST thất bại</b>\n\n"
+                    f"Chi tiết: <code>{detail}</code>\n\n"
+                    "<i>Gợi ý:</i> kiểm tra user, mật khẩu, <code>SPC_F</code> còn hiệu lực; "
+                    "thử proxy khác (<code>/kipx</code>, <code>/vnpx</code>); "
+                    "hoặc gửi sẵn <code>SPC_ST=...</code> nếu đã có cookie.",
+                    parse_mode="HTML",
+                )
+                return
+            if not spc_st_val or not str(spc_st_val).strip():
+                await update.message.reply_text(
+                    "❌ <b>Lấy cookie SPC_ST thất bại</b>\n\n"
+                    "Shopee không trả về <code>SPC_ST</code> (chuỗi rỗng). "
+                    "Thử đăng nhập lại trên web/app để lấy <code>SPC_F</code> mới.",
+                    parse_mode="HTML",
+                )
+                return
+            cookie_header = f"SPC_ST={spc_st_val}"
+        elif "SPC_ST=" in raw.upper():
+            cookie_header = raw.strip()
+        elif "|" not in raw:
+            st_only = raw.strip()
+            if not st_only:
+                await update.message.reply_text(
+                    "❌ Thiếu giá trị <code>SPC_ST</code>.",
+                    parse_mode="HTML",
+                )
+                return
+            cookie_header = f"SPC_ST={st_only}"
+        else:
+            await update.message.reply_text(
+                "❌ Định dạng không hợp lệ.\n"
+                "Dùng: <code>user|pass|sdt|SPC_F=...</code> hoặc <code>SPC_ST=...</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        ch = (cookie_header or "").strip()
+        if ch.upper().startswith("SPC_ST="):
+            _st_val = ch.split("=", 1)[-1].strip()
+            if not _st_val:
+                await update.message.reply_text(
+                    "❌ <b>Lấy cookie SPC_ST thất bại</b>\n\n"
+                    "Giá trị sau <code>SPC_ST=</code> đang trống.",
+                    parse_mode="HTML",
+                )
+                return
+
+        cookie_header = ch
+        spc_st_esc = html.escape(cookie_header)
+
+        results = await asyncio.to_thread(
+            save_voucher_batch,
+            VOUCHER_BATCH_LIST_HARDCODED,
+            cookie_header=cookie_header,
+            csrftoken=None,
+            proxies=proxies,
+        )
+
+        body = format_vc_telegram_html(results)
+        text = (
+            "✅ <b>Login thành công!</b>\n\n"
+            f"<code>{spc_st_esc}</code>\n\n"
+            "📝 <b>KẾT QUẢ LƯU VOUCHER</b>\n\n"
+            f"{body}"
+        )
+
+        if len(text) <= 4096:
+            await update.message.reply_text(text, parse_mode="HTML")
+        else:
+            chunk0 = text[:4096]
+            rest = text[4096:]
+            await update.message.reply_text(chunk0, parse_mode="HTML")
+            for i in range(0, len(rest), 4096):
+                await update.message.reply_text(rest[i : i + 4096], parse_mode="HTML")
+    finally:
+        try:
+            await context.bot.delete_message(
+                chat_id=chat_id, message_id=processing_msg.message_id
+            )
+        except Exception:
+            pass
+
+
 def build_spx_inline_keyboard(spx_tn: str, *, expanded: bool) -> InlineKeyboardMarkup:
     """Nút SPX: chi tiết/thu gọn, làm mới, thống kê, hướng dẫn, theo dõi."""
     detail_btn = InlineKeyboardButton(
@@ -1519,6 +1663,9 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     async def ghn_callback_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ghn_callback_handler(update, context)
 
+    async def vc_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await vc_command(update, context)
+
     # Tin nhắn bắt đầu bằng SPX → lịch sử giao hàng (không phải lệnh /...)
     spx_text_filter = (
         filters.TEXT
@@ -1544,6 +1691,7 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CommandHandler("kipx", kipx_command))
     application.add_handler(CommandHandler("vnpx", vnpx_command))
     application.add_handler(CommandHandler("delpx", delpx_command))
+    application.add_handler(CommandHandler("vc", vc_wrapper))
     application.add_handler(CallbackQueryHandler(email_callback_wrapper, pattern="^email_"))
     application.add_handler(CallbackQueryHandler(spx_callback_wrapper, pattern=r"^spx_[dcrshw]\|"))
     application.add_handler(MessageHandler(spx_text_filter, spx_tracking_message_handler))

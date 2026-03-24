@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 SPX VN — gọi API get_order_info và format lịch sử giao hàng (dùng cho bot & CLI).
+
+Package: ``shipping``
 """
 
 from __future__ import annotations

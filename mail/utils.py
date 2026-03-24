@@ -10,7 +10,7 @@ from typing import Dict, Any, List, Optional
 import time
 import login
 
-import email_api
+from . import api
 
 
 def format_timestamp_for_email(iso_string: str) -> str:
@@ -1061,7 +1061,7 @@ def process_mailfree(
     raw = (raw_input or "").strip()
 
     # Tạo email free (random local_part + password) (dùng proxy)
-    email, email_password, reg_result = email_api.register_email_full("", "", proxies=proxies)
+    email, email_password, reg_result = api.register_email_full("", "", proxies=proxies)
     print(f"reg_result:{reg_result}")
     if not email or not email_password:
         return {

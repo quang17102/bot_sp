@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 GHN — API tracking-logs (donhang.ghn.vn) và format lịch sử giao hàng (tương tự style SPX).
+
+Package: ``shipping``
 """
 
 from __future__ import annotations
 
 import html as html_lib
-import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 

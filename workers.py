@@ -9,10 +9,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from job_queue import Job
 from typing import Any, Dict
-import email_api
+from mail import api as email_api
+from mail import utils as email_utils
+from mail.utils import process_mailfree
 import login
 import login_qr
-import email_utils
 import voucher_status
 from voucher_status import (
     VOUCHER_BATCH_LIST_HARDCODED,
@@ -20,7 +21,6 @@ from voucher_status import (
     format_batch_cards_telegram_html,
 )
 from proxy_storage import get_user_best_proxy
-from email_utils import process_mailfree
 
 # Giờ Việt Nam (UTC+7, không DST)
 _TZ_VN = timezone(timedelta(hours=7))
