@@ -491,7 +491,7 @@ def build_order_record(order_id: str, cached_order: CachedOrder, detail_data: di
         "status": status,
         "tracking_number": tracking_number,
         "order_time": extract_order_time(detail_data) if detail_data else "Khong co",
-        "final_total": cached_order.final_total or first_item.get("order_price") or 0,
+        "final_total": cached_order.final_total or 0,
         "shipping_name": address.get("shipping_name") or "",
         "shipping_phone": address.get("shipping_phone") or "",
         "shipping_address": address.get("shipping_address") or "",
