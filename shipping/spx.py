@@ -30,8 +30,11 @@ HISTORY_SEP = "─ ─ ─ ─ ─ ─ ─ ─ ─ ─"
 # Telegram Bot API: tối đa 4096 ký tự / tin nhắn text
 TELEGRAM_MAX_MESSAGE_CHARS = 4096
 
-# Mã vận đơn: bắt đầu SPX, chữ/số/gạch (token đầu dòng)
-SPX_TRACKING_RE = re.compile(r"^SPX[A-Za-z0-9\-]+", re.IGNORECASE)
+# Mã vận đơn: bắt đầu SPX hoặc VN, chữ/số/gạch (token đầu dòng; cùng API get_order_info)
+SPX_TRACKING_RE = re.compile(
+    r"^(?:SPX|VN)[A-Za-z0-9\-]+",
+    re.IGNORECASE,
+)
 
 _DEFAULT_HEADERS = {
     "accept": "application/json, text/plain, */*",
@@ -48,7 +51,7 @@ _DEFAULT_HEADERS = {
 
 
 def extract_spx_tracking_from_text(text: str) -> Optional[str]:
-    """Lấy mã vận đơn từ tin nhắn (dòng bắt đầu bằng SPX)."""
+    """Lấy mã vận đơn từ tin nhắn (dòng bắt đầu bằng SPX hoặc VN)."""
     if not text:
         return None
     m = SPX_TRACKING_RE.match(text.strip())

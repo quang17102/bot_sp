@@ -1442,7 +1442,7 @@ async def spx_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def spx_tracking_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Tin nhắn text bắt đầu bằng SPX (vd. SPXVN...) → tra API và trả tóm tắt + nút,
+    Tin nhắn text bắt đầu bằng SPX hoặc VN → tra API SPX và trả tóm tắt + nút,
     reply ngay tại tin nhắn đó.
     """
     msg = update.effective_message
@@ -1452,7 +1452,7 @@ async def spx_tracking_message_handler(update: Update, context: ContextTypes.DEF
     spx_tn = spx.extract_spx_tracking_from_text(msg.text)
     if not spx_tn:
         await msg.reply_text(
-            "❌ Không đọc được mã vận đơn. Gửi dạng: <code>SPXVN...</code>",
+            "❌ Không đọc được mã vận đơn. Gửi dạng: <code>SPX...</code> hoặc <code>VN...</code>",
             parse_mode="HTML",
             reply_to_message_id=msg.message_id,
         )
@@ -1666,11 +1666,11 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     async def vc_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await vc_command(update, context)
 
-    # Tin nhắn bắt đầu bằng SPX → lịch sử giao hàng (không phải lệnh /...)
+    # Tin nhắn bắt đầu bằng SPX hoặc VN → tra SPX (không phải lệnh /...)
     spx_text_filter = (
         filters.TEXT
         & ~filters.COMMAND
-        & filters.Regex(re.compile(r"^SPX", re.IGNORECASE))
+        & filters.Regex(re.compile(r"^(?:SPX|VN)", re.IGNORECASE))
     )
 
     # \u0110\u0103ng k\u00FD handlers

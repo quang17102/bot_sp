@@ -5,13 +5,21 @@ Utilities cho việc xử lý email từ TempMail API
 
 import html
 import re
+import sys
 import requests
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 import time
-import login
 
-from . import api
+try:
+    from . import api
+except ImportError:
+    # python mail/utils.py — không có parent package
+    _root = Path(__file__).resolve().parent.parent
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    from mail import api
 
 
 def format_timestamp_for_email(iso_string: str) -> str:
@@ -1172,6 +1180,147 @@ def api_add_email_by_cookie(cookie: str, email: str, proxies: dict | None = None
         "email": updated_email,
     }
 
+
+def api_change_email_by_cookie(cookie: str, email: str, proxies: dict | None = None) -> dict:
+    cookie = (cookie or "").strip()
+    email = (email or "").strip()
+    if not cookie or not email:
+        return {
+            "success": False,
+            "message": "Thieu cookie hoac email",
+            "username": None,
+            "phone": None,
+            "email": None,
+        }
+
+    session = requests.Session()
+    if proxies:
+        session.proxies.update(proxies)
+    st_cookie = extract_spc_st_cookie(cookie)
+    if not st_cookie:
+        return {
+            "success": False,
+            "message": "Cookie khong chua SPC_ST",
+            "username": None,
+            "phone": None,
+            "email": None,
+        }
+
+    headers_get = {
+        "accept": "application/json, text/plain, */*",
+        "cookie": st_cookie,
+        "user-agent": "Mozilla/5.0",
+    }
+
+    try:
+        resp = session.get(
+            "https://banhang.shopee.vn",
+            headers=headers_get,
+            timeout=(5, 20),
+        )
+    except requests.RequestException as exc:
+        return {
+            "success": False,
+            "message": f"Loi ket noi: {exc}",
+            "username": None,
+            "phone": None,
+            "email": None,
+        }
+
+    spc_sc_session = resp.cookies.get("SPC_SC_SESSION")
+    if not spc_sc_session:
+        return {
+            "success": False,
+            "message": "Cookie die hoac het han",
+            "username": None,
+            "phone": None,
+            "email": None,
+        }
+
+    def _auth_cookie() -> str:
+        return f"{st_cookie}; SPC_SC_SESSION={spc_sc_session}"
+
+    def get_account_info() -> dict:
+        url = "https://shopee.vn/api/v4/account/basic/get_account_info"
+        headers = {"cookie": _auth_cookie(), "user-agent": "Mozilla/5.0"}
+        try:
+            r = session.get(url, headers=headers, timeout=(5, 20))
+            return (r.json() or {}).get("data") or {}
+        except Exception:
+            return {}
+
+    info_before = get_account_info()
+    print(f"info_before:{info_before}")
+    # if info_before.get("email"):
+    #     print(f"info_before:{info_before}")
+    #     return {
+    #         "success": False,
+    #         "message": f"Tai khoan da co email: {info_before.get('email')}",
+    #         "username": info_before.get("username"),
+    #         "phone": info_before.get("phone"),
+    #         "email": info_before.get("email"),
+    #     }
+
+    url_post = (
+        "https://banhang.shopee.vn/api/onboarding/local_onboard/v1/"
+        "vn_onboard/save/?SPC_CDS=1fe0f0ea-5d75-4ba4-a530-5bae262fe0ef&SPC_CDS_VER=2"
+    )
+    payload = {
+        "check": False,
+        "lang": "vi",
+        "step": {
+            "step_id": 291100,
+            "form": {
+                "form_version": 1,
+                "save_version": 0,
+                "form_id": 291100,
+                "components": [
+                    {"component_id_str": "form_0_component_291103_c", "component_value": email}
+                ],
+            },
+        },
+    }
+    headers_post = {
+        "accept": "application/json, text/plain, */*",
+        "content-type": "application/json;charset=UTF-8",
+        "cookie": _auth_cookie(),
+        "origin": "https://banhang.shopee.vn",
+        "referer": "https://banhang.shopee.vn/portal/vn-onboarding/form/291000/291100",
+        "user-agent": "Mozilla/5.0",
+    }
+
+    try:
+        session.post(url_post, headers=headers_post, json=payload, timeout=(5, 20))
+    except requests.RequestException as exc:
+        return {
+            "success": False,
+            "message": f"Loi gui form them email: {exc}",
+            "username": None,
+            "phone": None,
+            "email": None,
+        }
+
+    time.sleep(1)
+    info_after = get_account_info()
+    updated_email = info_after.get("email")
+
+    if updated_email == email:
+        return {
+            "success": True,
+            "message": f"Them email thanh cong: {email}",
+            "username": info_after.get("username"),
+            "phone": info_after.get("phone"),
+            "email": updated_email,
+        }
+
+    return {
+        "success": False,
+        "message": "Them email that bai",
+        "username": info_after.get("username"),
+        "phone": info_after.get("phone"),
+        "email": updated_email,
+    }
+
 def process_mailfree(
     raw_input: str,
     proxies: Dict[str, str],
@@ -1208,7 +1357,9 @@ def process_mailfree(
             input_line = f"{username}|{password}||{spc_f}"
 
         try:
-            spc_st = login.extract_spc_st(input_line, proxies=proxies)
+            import login as login_mod
+
+            spc_st = login_mod.extract_spc_st(input_line, proxies=proxies)
         except Exception as e:
             return {"status": "error", "error": f"Extract SPC_ST thất bại: {e}"}
 
@@ -1235,3 +1386,6 @@ def process_mailfree(
         "password": email_password,
     }
 
+cookie = "SPC_ST=cUJseVdjeG1kNUJXSElMZS8Yc8SUP7Sg9Hm11/jo+M61g/dNFxCNS9nbEThir8FgEx1qTTzFlkaz7kLue7SLXivIS+OcSKnylcjdNp2odNK3khZUYWwpa1m8b57e+94Y0AH5cNYH/Bhd3uivpSZ8OUX+smNmKolf+c32zt17nw5cvy9CW44rI8dKFiGnaoR1LI482bvkRBS065EPc/7E6NKvJAa2YMHYw6n4p4Bs0WY=.AKTqhphS/HCc31MQ3kgP6pmWHPAr8viWnPrwpY6IrKk9"
+value = api_change_email_by_cookie(cookie=cookie, email="7c0jvmgxu6@namkhanh61.com", proxies=None)
+print(f"value:{value}")
