@@ -133,7 +133,7 @@ def format_order_like_form(order: dict) -> str:
     # Nếu trạng thái bị hủy -> có dòng đỏ "Hủy đơn" (so khớp sau khi bỏ dấu — trạng thái có thể là tiếng Việt có dấu)
     s_fold = checkmvd.fold_vietnamese(str(status_text).lower())
     is_cancel = (
-        ("huy" in s_fold)
+        (" huy " in s_fold)
         or ("hoan tra" in s_fold)
         or ("hoan tien" in s_fold)
         or ("da huy" in s_fold)
