@@ -10,7 +10,7 @@ import re
 from shipping import spx, ghn
 import checkmvd
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -69,6 +69,43 @@ def _escape(v) -> str:
 def _copyable(v) -> str:
     """Giá trị bọc <code> để người dùng dễ chạm copy trên Telegram (parse_mode HTML)."""
     return f"<code>{_escape(v)}</code>"
+
+
+def _mask_shopee_account(account: Optional[str]) -> str:
+    """Ẩn phần giữa tài khoản (vd. 1***q9j)."""
+    if not account:
+        return "—"
+    s = str(account).strip()
+    if not s:
+        return "—"
+    if len(s) <= 4:
+        return f"{s[0]}***"
+    return f"{s[0]}***{s[-3:]}"
+
+
+def _login_warning_time_display(email: dict) -> str:
+    """Ưu tiên Thời gian truy cập trong body; không có thì format date mail theo giờ VN."""
+    body = email.get("body_text") or ""
+    time_access = email_utils.parse_time_from_body(body)
+    if time_access:
+        return time_access.strip()
+    ts = email.get("date") or ""
+    if not ts:
+        return "—"
+    try:
+        date_str = ts
+        if date_str.endswith("Z"):
+            date_str = date_str[:-1] + "+00:00"
+        elif "+" not in date_str[-6:] and "-" not in date_str[-6:]:
+            date_str = date_str + "+00:00"
+        dt = datetime.fromisoformat(date_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        vn = timezone(timedelta(hours=7))
+        return dt.astimezone(vn).strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        out = email_utils.format_timestamp_for_email(ts)
+        return out if out else "—"
 
 
 def format_order_like_form(order: dict) -> str:
@@ -752,30 +789,43 @@ async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                     verification_link = email_utils.parse_verification_link_from_body(body_text, body_html)
                     
                     if verification_link:
-                        # Hiển thị thông báo đang xử lý
                         await query.answer("Đang xử lý...", show_alert=False)
 
-                        # Dùng mail.verify (Playwright) thay cho call_verification_link
-                        chat_id = query.message.chat_id
+                        acc_raw = email_utils.parse_account_from_body(body_text)
+                        device = email_utils.parse_device_from_body(body_text)
+                        location = email_utils.parse_location_from_body(body_text)
+                        acc_show = _mask_shopee_account(acc_raw)
+                        time_show = _login_warning_time_display(email_detail)
+                        dev_show = device.strip() if device else "—"
+                        loc_show = location.strip() if location else "—"
+
+                        success_text = (
+                            "✅ <b>Xác minh thành công!</b>\n\n"
+                            f"👤 <b>Tài khoản:</b> <code>{_escape(acc_show)}</code>\n"
+                            f"🕐 <b>Thời gian:</b> {_escape(time_show)}\n"
+                            f"💻 <b>Thiết bị:</b> {_escape(dev_show)}\n"
+                            f"📍 <b>Vị trí:</b> {_escape(loc_show)}"
+                        )
                         read_btn = InlineKeyboardButton(
                             text="📩 Đọc Mail",
                             callback_data=f"email_read_{job_id}",
                         )
                         reply_markup = InlineKeyboardMarkup([[read_btn]])
 
-                        # Hiển thị "thành công" ngay lập tức (không chờ verify chạy xong).
-                        await query.message.reply_text(
-                            "✅ <b>Xác minh thành công!</b>\n\n",
-                            parse_mode="HTML",
-                            reply_markup=reply_markup,
-                        )
+                        try:
+                            await query.edit_message_text(
+                                success_text,
+                                parse_mode="HTML",
+                                reply_markup=reply_markup,
+                            )
+                        except BadRequest as e:
+                            if "not modified" not in str(e).lower():
+                                raise
 
-                        # Chạy verify ngầm (không chặn handler).
                         async def _background_verify() -> None:
                             try:
                                 await asyncio.to_thread(verify_link, verification_link)
                             except Exception as e:
-                                # Không thông báo lại UI để đúng yêu cầu "hiển thị thành công ngay".
                                 print(e)
 
                         asyncio.create_task(_background_verify())
