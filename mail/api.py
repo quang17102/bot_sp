@@ -9,11 +9,11 @@ REGISTER_URL = "https://cheapluxurymail.xyz/register"
 
 def get_domains() -> List[str]:
     """
-    Gọi API lấy danh sách domain khả dụng.
+    Gọi API lấy danh sách domain khả dụng, chọn ngẫu nhiên một domain.
 
     Returns:
-        List các domain, ví dụ: ["example.com", "tempmail.com", ...]
-        Nếu lỗi sẽ trả về list rỗng.
+        List một phần tử là domain được chọn, ví dụ: ["example.com"].
+        Nếu lỗi hoặc không có domain thì trả về list rỗng.
     """
     try:
         resp = requests.get(DOMAINS_URL, timeout=10)
@@ -21,7 +21,10 @@ def get_domains() -> List[str]:
         data = resp.json()
         domains = data.get("data", {}).get("domains", [])
         if isinstance(domains, list):
-            return [str(d) for d in domains]
+            cleaned = [str(d).strip() for d in domains if str(d).strip()]
+            if not cleaned:
+                return []
+            return [random.choice(cleaned)]
         return []
     except Exception as e:
         print(f"get_domains error: {e}")
@@ -30,7 +33,7 @@ def get_domains() -> List[str]:
 
 def get_domains_with_proxy(proxies: Optional[Dict[str, str]] = None) -> List[str]:
     """
-    Gọi API lấy danh sách domain khả dụng (có hỗ trợ proxy).
+    Gọi API lấy danh sách domain khả dụng (có hỗ trợ proxy), chọn ngẫu nhiên một domain.
     """
     try:
         session = requests.Session()
@@ -41,7 +44,10 @@ def get_domains_with_proxy(proxies: Optional[Dict[str, str]] = None) -> List[str
         data = resp.json()
         domains = data.get("data", {}).get("domains", [])
         if isinstance(domains, list):
-            return [str(d) for d in domains]
+            cleaned = [str(d).strip() for d in domains if str(d).strip()]
+            if not cleaned:
+                return []
+            return [random.choice(cleaned)]
         return []
     except Exception as e:
         print(f"get_domains_with_proxy error: {e}")
@@ -56,14 +62,14 @@ def register_email_full(
 ) -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
     """
     Đăng ký email hoàn chỉnh:
-      1. Nếu không truyền domain -> tự gọi get_domains() và chọn domain đầu tiên.
+      1. Nếu không truyền domain -> tự gọi get_domains() và chọn domain ngẫu nhiên.
       2. Ghép thành email: <local_part>@<domain>.
       3. Gọi API /register để đăng ký.
 
     Args:
         local_part: phần trước dấu @ (ví dụ: 'johndoe')
         password: mật khẩu cho email
-        domain: domain muốn dùng; nếu None sẽ auto chọn domain đầu tiên từ API.
+        domain: domain muốn dùng; nếu None sẽ auto chọn domain ngẫu nhiên từ API.
         proxies: dict proxy requests (ví dụ {"http": "...", "https": "..."}), optional.
 
     Returns:
