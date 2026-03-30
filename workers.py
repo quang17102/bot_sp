@@ -390,6 +390,125 @@ def handle_mailfree(job: Job) -> Dict[str, Any]:
         }
 
 
+def handle_addmail(job: Job) -> Dict[str, Any]:
+    """
+    Worker handler cho command /addmail.
+
+    Input (từ commands.py):
+      - "input": id|pass|cookie_f
+      - "email": email cần add vào Shopee account
+
+    Luồng:
+      1) Tạo SPC_ST từ login.extract_spc_st (dựa trên id/pass/cookie_f)
+      2) Gọi api_add_email_by_cookie(cookie=SPC_ST, email=...) để add email
+    """
+    user_id = job.user_id
+    job_data = job.data or {}
+
+    raw = ""
+    if isinstance(job_data, dict):
+        raw = str(job_data.get("input") or "").strip()
+    else:
+        raw = str(job_data).strip()
+
+    email = ""
+    if isinstance(job_data, dict):
+        email = str(job_data.get("email") or "").strip()
+
+    if not raw or not email:
+        return {
+            "status": "success",
+            "message": "❌ Thiếu input hoặc email!!!",
+            "message_format": "HTML",
+        }
+
+    try:
+        proxies, proxy_source = get_user_best_proxy(user_id)
+        if proxies is None or proxies == {}:
+            return {
+                "status": "success",
+                "message": "❌ Vui lòng kiểm tra proxy nhé!!!",
+                "message_format": "HTML",
+            }
+
+        parts = [p.strip() for p in raw.split("|")]
+        # Cho phép 2 dạng:
+        #   1) id|pass|cookie_f
+        #   2) id|pass|sdt|cookie_f (sdt có thể bỏ qua/rỗng)
+        if len(parts) not in (3, 4):
+            return {
+                "status": "success",
+                "message": "❌ Format input sai! Dùng: <code>id|pass|cookie_f</code> hoặc <code>id|pass|sdt|cookie_f</code>",
+                "message_format": "HTML",
+            }
+        spc_user = parts[0] if len(parts) >= 1 else ""
+        spc_pass = parts[1] if len(parts) >= 2 else ""
+        cookie_f = parts[2] if len(parts) == 3 else parts[3]
+        sdt = "" if len(parts) == 3 else parts[2]
+
+        if not spc_user or not spc_pass or not cookie_f:
+            return {
+                "status": "success",
+                "message": "❌ Input không được để trống! Dùng: <code>id|pass|cookie_f</code> hoặc <code>id|pass|sdt|cookie_f</code>",
+                "message_format": "HTML",
+            }
+
+        # login.parse_input() cần 4 phần: username|password|sdt|SPC_F (sdt có thể rỗng)
+        # - nếu user không truyền sdt -> dùng chuỗi rỗng
+        input_line = f"{spc_user}|{spc_pass}|{sdt}|{cookie_f}"
+        spc_st = login.extract_spc_st(input_line, proxies=proxies)
+
+        add_result = email_utils.api_add_email_by_cookie(
+            cookie=spc_st,
+            email=email,
+            proxies=proxies,
+        )
+
+        success = bool(add_result.get("success"))
+        username = add_result.get("username") or "—"
+        phone = add_result.get("phone") or "—"
+        raw_message = add_result.get("message") or ""
+
+        if success:
+            msg = (
+                "✅ <b>Thêm email thành công</b>\n\n"
+                f"📧 Email: <code>{html.escape(email)}</code>\n"
+                f"👤 Username: <code>{html.escape(str(username))}</code>\n"
+                f"📱 Phone: <code>{html.escape(str(phone))}</code>\n"
+            )
+            return {
+                "status": "success",
+                "message": msg,
+                "message_format": "HTML",
+            }
+
+        msg = (
+            "❌ <b>Thêm email thất bại</b>\n\n"
+            f"📧 Email: <code>{html.escape(email)}</code>\n"
+        )
+        if raw_message:
+            msg += f"\n\n⚠️ {html.escape(str(raw_message))}"
+        else:
+            msg += "\n\n⚠️ Không xác định được lỗi."
+        if username != "—" or phone != "—":
+            msg += (
+                f"\n\n👤 Username: <code>{html.escape(str(username))}</code>"
+                f"\n📱 Phone: <code>{html.escape(str(phone))}</code>"
+            )
+
+        return {
+            "status": "success",
+            "message": msg,
+            "message_format": "HTML",
+        }
+    except Exception as e:
+        return {
+            "status": "success",
+            "message": f"❌ Không add được email. Lỗi: <code>{html.escape(str(e))}</code>",
+            "message_format": "HTML",
+        }
+
+
 def handle_newmail(job: Job) -> Dict[str, Any]:
     """
     /newmail — chỉ gọi register_email_full (email + password random), không gắn Shopee.

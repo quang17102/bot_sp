@@ -634,6 +634,82 @@ async def mailfree_command(update: Update, context: ContextTypes.DEFAULT_TYPE, j
     )
 
 
+async def addmail_command(update: Update, context: ContextTypes.DEFAULT_TYPE, job_queue: JobQueue, bot_app: 'Application'):
+    """
+    /addmail <id|pass|cookie_f> <email>
+    /addmail <id|pass|sdt|cookie_f> <email>   (sdt có thể bỏ qua)
+
+    Luồng:
+      - Tạo job: job_type="addmail"
+      - Worker sẽ:
+          + login.extract_spc_st từ id/pass/cookie_f
+          + gọi email_utils.api_add_email_by_cookie(cookie=spc_st, email=...)
+    """
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat.id
+    args = context.args
+
+    if not args or len(args) < 2:
+        await update.message.reply_text(
+            "❌ Thiếu tham số!\n"
+            "Cú pháp:\n"
+            "<code>/addmail &lt;id|pass|cookie_f&gt; &lt;email&gt;</code>\n"
+            "Ví dụ:\n"
+            "<code>/addmail 12345|MyPass|SPC_F=xxxx mailtest@example.com</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    raw_input = str(args[0]).strip()
+    email = " ".join(args[1:]).strip()
+
+    # Validate input cơ bản để báo lỗi sớm
+    # Cho phép 2 dạng:
+    #   1) id|pass|cookie_f
+    #   2) id|pass|sdt|cookie_f (sdt có thể rỗng)
+    parts = [p.strip() for p in raw_input.split("|")]
+    if len(parts) not in (3, 4) or not parts[0] or not parts[1] or not email:
+        await update.message.reply_text(
+            "❌ Format không đúng!\n"
+            "Cú pháp:\n"
+            "<code>/addmail id|pass|cookie_f email</code>\n"
+            "<code>/addmail id|pass|sdt|cookie_f email</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    job_id = job_queue.add_job_if_no_active(
+        job_type="addmail",
+        user_id=user_id,
+        chat_id=chat_id,
+        data={
+            "input": raw_input,
+            "email": email,
+        },
+    )
+
+    if job_id is None:
+        active_job = job_queue.get_active_job_for_user(user_id, job_type="addmail")
+        if active_job:
+            status_text = "đang chờ" if active_job.status == "pending" else "đang xử lý"
+            await update.message.reply_text(
+                f"⏸️ Bạn đã có job đang {status_text}!\n"
+                f"📋 Job ID: {active_job.job_id[:8]}\n"
+                f"⏳ Trạng thái: {active_job.status}\n"
+                f"Vui lòng đợi job hiện tại hoàn thành trước khi gửi request mới."
+            )
+        else:
+            await update.message.reply_text(
+                "⏸️ Bạn đã có job đang xử lý. Vui lòng đợi job hiện tại hoàn thành."
+            )
+        return
+
+    processing_msg = await update.message.reply_text("⏳ Đang xử lý...")
+    asyncio.create_task(
+        check_job_status(chat_id, job_id, job_queue, bot_app, processing_msg.message_id)
+    )
+
+
 async def newmail_command(update: Update, context: ContextTypes.DEFAULT_TYPE, job_queue: JobQueue, bot_app: 'Application'):
     """
     /newmail — đăng ký inbox mới qua register_email_full (random local + password),
@@ -1698,6 +1774,9 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     async def mailfree_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await mailfree_command(update, context, job_queue, application)
 
+    async def addmail_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await addmail_command(update, context, job_queue, application)
+
     async def newmail_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await newmail_command(update, context, job_queue, application)
     
@@ -1736,6 +1815,7 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CommandHandler("qr", qr_wrapper))
     application.add_handler(CommandHandler("checkmail", checkmail_wrapper))
     application.add_handler(CommandHandler("mailfree", mailfree_wrapper))
+    application.add_handler(CommandHandler("addmail", addmail_wrapper))
     application.add_handler(CommandHandler("newmail", newmail_wrapper))
     application.add_handler(CommandHandler("queue", queue_wrapper))
     application.add_handler(CommandHandler("kipx", kipx_command))
