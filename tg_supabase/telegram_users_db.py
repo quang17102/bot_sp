@@ -39,8 +39,8 @@ def save_user_on_start(telegram_user_id: int, full_name: str) -> None:
             {
                 "telegram_user_id": telegram_user_id,
                 "first_name": full_name,
-                "free_voucher_turns": 5,
-                "topup_turns": 0,
+                # "free_voucher_turns": 5,
+                # "topup_turns": 0,
             }
         ).execute()
     except Exception:
