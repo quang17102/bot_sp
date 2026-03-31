@@ -32,6 +32,12 @@ from proxy_storage import (
 )
 import login
 import login_qr
+from tg_supabase.telegram_users_db import save_user_on_start, get_telegram_user
+from tg_supabase.subscriptions import get_active_reg_subscriptions
+from tg_supabase.voucher_logs import (
+    get_active_voucher_subscription,
+    get_free_voucher_used_today,
+)
 
 if TYPE_CHECKING:
     from telegram.ext import Application
@@ -69,6 +75,154 @@ def _escape(v) -> str:
 def _copyable(v) -> str:
     """Giá trị bọc <code> để người dùng dễ chạm copy trên Telegram (parse_mode HTML)."""
     return f"<code>{_escape(v)}</code>"
+
+
+def _format_expires_vn(expires_raw: Optional[str]) -> str:
+    """Chuỗi expires_at từ DB → hiển thị giờ VN dd/mm/yyyy HH:MM."""
+    if not expires_raw:
+        return ""
+    try:
+        s = str(expires_raw).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        vn = timezone(timedelta(hours=7))
+        return dt.astimezone(vn).strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return str(expires_raw)
+
+
+START_GUIDE_TELEGRAPH_URL = (
+    "https://telegra.ph/H%C6%B0%E1%BB%9Bng-D%E1%BA%ABn-S%E1%BB%AD-D%E1%BB%A5ng-Bot-03-31"
+)
+
+
+def build_start_inline_keyboard() -> InlineKeyboardMarkup:
+    """Nút /start — Hướng dẫn mở Telegra.ph; các nút còn lại popup (callback start_*)."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📖 Hướng dẫn", url=START_GUIDE_TELEGRAPH_URL),
+                InlineKeyboardButton("💬 Liên hệ", callback_data="start_contact"),
+            ],
+            [
+                InlineKeyboardButton("📢 Channel", callback_data="start_channel"),
+                InlineKeyboardButton("👥 Group Chat", callback_data="start_group"),
+            ],
+        ]
+    )
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh /start — chào user + nút Hướng dẫn / Liên hệ / Channel / Group."""
+    msg = update.effective_message
+    if not msg:
+        return
+    user = update.effective_user
+    if user:
+        display_full = (user.full_name or user.username or "").strip()
+        await asyncio.to_thread(
+            save_user_on_start,
+            user.id,
+            display_full or "",
+        )
+    name = (user.first_name or user.username or "bạn").strip() or "bạn"
+    text = (
+        f"👋 Xin chào {_escape(name)}!\n\n"
+        "Nhấn 📖 Hướng dẫn để xem toàn bộ chức năng."
+    )
+    await msg.reply_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=build_start_inline_keyboard(),
+    )
+
+
+async def start_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Các nút dưới /start: báo đang phát triển."""
+    q = update.callback_query
+    if not q or not q.data or not q.data.startswith("start_"):
+        return
+    await q.answer("Tính năng đang phát triển.", show_alert=True)
+
+
+NAPTIEN_HELP_TEXT = (
+    "💎 <b>BẢNG GIÁ NẠP TIỀN</b>\n"
+    "____________________________\n\n"
+    "🚀 <b>Gói REG (Reg + Voucher unlimited):</b>\n"
+    "• /naptien reg1 → 100K (1 ngày)\n"
+    "• /naptien reg7 → 500K (7 ngày)\n"
+    "• /naptien reg30 → 1.000K (30 ngày)\n\n"
+    "🎫 <b>Gói SV (Chỉ Voucher unlimited):</b>\n"
+    "• /naptien sv7 → 200K (7 ngày)\n"
+    "• /naptien sv30 → 500K (30 ngày)\n\n"
+    "💰 <b>Credit lẻ (1.000đ/lượt):</b>\n"
+    "• /naptien 10 → 10.000đ\n"
+    "• /naptien 100 → 100.000đ\n\n"
+    "⏳ <i>Hệ thống tự động cộng sau 1–2 phút.</i>"
+)
+
+
+async def naptien_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh /naptien — in bảng giá nạp tiền."""
+    msg = update.effective_message
+    if not msg:
+        return
+    await msg.reply_text(NAPTIEN_HELP_TEXT, parse_mode="HTML")
+
+
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh /info — hiển thị thông tin tài khoản, gói reg & voucher."""
+    msg = update.effective_message
+    if not msg:
+        return
+    user = update.effective_user
+    if not user:
+        await msg.reply_text("Không lấy được thông tin user.")
+        return
+
+    telegram_user_id = user.id
+    display_name = (
+        (user.full_name or user.username or user.first_name or "bạn").strip()
+    )
+
+    # Thông tin từ bảng telegram_users
+    db_user = get_telegram_user(telegram_user_id)
+    balance = 0
+    if db_user is not None:
+        balance = db_user.get("tien") or 0
+
+    # Gói reg (reg1/reg7/reg30) + thời hạn
+    reg_subs = get_active_reg_subscriptions(telegram_user_id)
+    if reg_subs:
+        first_reg = reg_subs[0]
+        reg_pkg = first_reg.get("package_code") or "?"
+        exp_reg = _format_expires_vn(first_reg.get("expires_at"))
+        reg_text = f"{reg_pkg} — hết hạn: {exp_reg}" if exp_reg else reg_pkg
+    else:
+        reg_text = "không có gói nào"
+
+    # Gói lưu voucher / lượt free còn lại
+    DAILY_FREE_LIMIT = 5
+    vsub = get_active_voucher_subscription(telegram_user_id)
+    if vsub:
+        vcode = (vsub.get("package_code") or "?").strip()
+        exp_v = _format_expires_vn(vsub.get("expires_at"))
+        voucher_text = f"{vcode} — hết hạn: {exp_v}" if exp_v else vcode
+    else:
+        used_today = get_free_voucher_used_today(telegram_user_id)
+        free_left = max(0, DAILY_FREE_LIMIT - used_today)
+        voucher_text = f"{free_left}/{DAILY_FREE_LIMIT}"
+
+    text = (
+        f"👤 Tên: {_escape(display_name)}\n"
+        f"📦 Gói reg: {reg_text}\n"
+        f"🎫 Gói lưu voucher: {voucher_text}\n"
+        f"💰 Số tiền còn lại: {balance}"
+    )
+    await msg.reply_text(text)
 
 
 def _mask_shopee_account(account: Optional[str]) -> str:
@@ -1795,6 +1949,18 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     async def vc_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await vc_command(update, context)
 
+    async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await start_command(update, context)
+
+    async def start_callback_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await start_callback_handler(update, context)
+
+    async def naptien_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await naptien_command(update, context)
+
+    async def info_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await info_command(update, context)
+
     # Tin nhắn bắt đầu bằng SPX hoặc VN → tra SPX (không phải lệnh /...)
     spx_text_filter = (
         filters.TEXT
@@ -1810,6 +1976,10 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
         & filters.Regex(re.compile(r"^G[A-Za-z0-9]{7}$"))
     )
 
+    application.add_handler(CommandHandler("start", start_wrapper))
+    application.add_handler(CommandHandler("naptien", naptien_wrapper))
+    application.add_handler(CommandHandler("info", info_wrapper))
+    application.add_handler(CallbackQueryHandler(start_callback_wrapper, pattern=r"^start_"))
     application.add_handler(CommandHandler("cvc", cvc_wrapper))
     application.add_handler(CommandHandler("cks", cks_wrapper))
     application.add_handler(CommandHandler("qr", qr_wrapper))
