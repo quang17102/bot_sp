@@ -36,40 +36,40 @@ VOUCHER_BATCH_SEPARATOR = "\n─────────────────
 # Khi chạy: `python voucher_status.py batch` (không cần -i) sẽ dùng list này.
 VOUCHER_BATCH_LIST_HARDCODED: List[Dict[str, Any]] = [
     {
-        "ten_ma": "100.000đ | Đơn 0đ",
-        "promotionid": 1365690377211904,
-        "voucher_code": "CRMNUICL80T3",
-        "signature": "b3ca10e3fa0e469b3c52577083cb3ee617ec2d40dd6ad1a3130609050d296c93",
-    },
-    {
-        "ten_ma": "100.000đ | Đơn 0đ",
-        "promotionid": 1364961121046528,
-        "voucher_code": "CRM19032503NBCP80K",
-        "signature": "3e4dc9053e0511d842d8faca0f42ec2b8c9afa204ac5aa91848478216260a050",
-    },
-    {
-        "ten_ma": "100.000đ | Đơn 0đ",
-        "promotionid": 1364240113766400,
-        "voucher_code": "Q1JNTlVJQ0xIQ01UMw",
-        "signature": "b0f1cf1ee9828007ab7a0a999df1d5c9bb2c9168afef559a60da79aa31c70451",
+        "ten_ma": "Giảm 20k₫ | Đơn 0đ",
+        "promotionid": 1384635680329728,
+        "voucher_code": "CRMWBZ0426A",
+        "signature": "739bef100470de02b9ba0b0ac1643d6f437c8ddececb937ce2dfb168230f5e72",
     },
     # {
-    #     "ten_ma": "Giảm: 80.000đ | Đơn 0đ",
-    #     "promotionid": 1375377811214336,
-    #     "voucher_code": "CRMNUIIZCL80T3V3",
-    #     "signature": "99dea321442ee33761d01b7c2e578b3c9656eb7089c6df811bd66562e39cf58e",
+    #     "ten_ma": "100.000đ | Đơn 0đ",
+    #     "promotionid": 1364961121046528,
+    #     "voucher_code": "CRM19032503NBCP80K",
+    #     "signature": "3e4dc9053e0511d842d8faca0f42ec2b8c9afa204ac5aa91848478216260a050",
+    # },
+    # {
+    #     "ten_ma": "100.000đ | Đơn 0đ",
+    #     "promotionid": 1364240113766400,
+    #     "voucher_code": "Q1JNTlVJQ0xIQ01UMw",
+    #     "signature": "b0f1cf1ee9828007ab7a0a999df1d5c9bb2c9168afef559a60da79aa31c70451",
     # },
     {
-        "ten_ma": "80.000đ | Đơn 0đ",
-        "promotionid": 1364240045477888,
-        "voucher_code": "CRMNUIDP80T3",
-        "signature": "b3d419fc12e103249ea8ffcee7a596d61235bda334aec0f991711c4bade69d87",
+        "ten_ma": "Giảm: 80.000đ | Đơn 0đ",
+        "promotionid": 1384552666140672,
+        "voucher_code": "CRMNUICL80T4",
+        "signature": "f94dfdd4a0f5b3555e443a9298d1c4c838fef8017feed8ad900e0593138716c2",
+    },
+    {
+        "ten_ma": "Giảm 50% Giảm tối đa 100k₫ | Đơn 0đ",
+        "promotionid": 1384552716472320,
+        "voucher_code": "CRMNUICLSOUTHT4",
+        "signature": "60136eaf11ac1c6d53749852b01fbbad61921ae6afef58d27186a53ad8612009",
     },
     {
         "ten_ma": "Tối đa 500.000 ₫",
-        "promotionid": 1363693662932996,
-        "voucher_code": "FSV-1363693662932996",
-        "signature": "6688290d7df8e513c74249bdfc8d43168fc1c8065e7461f3bad2ea92a4cb0483",
+        "promotionid": 1383813714055168,
+        "voucher_code": "FSV-1383813714055168",
+        "signature": "8cabc48addb325ce3ebe81513683b179ace0e7f3cfa9caccd9274e1edb2f87bf",
     },
 ]
 
