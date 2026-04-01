@@ -2069,6 +2069,7 @@ def build_spx_inline_keyboard(spx_tn: str, *, expanded: bool) -> InlineKeyboardM
 
 
 async def spx_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print("Callback inline SPX")
     """Callback inline SPX: chi tiết / thu gọn / làm mới / stub các nút còn lại."""
     q = update.callback_query
     if not q or not q.data:
@@ -2169,6 +2170,7 @@ async def spx_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def spx_tracking_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print("Ma van don message")
     """
     Tin nhắn text bắt đầu bằng SPX hoặc VN → tra API SPX và trả tóm tắt + nút,
     reply ngay tại tin nhắn đó.
@@ -2176,7 +2178,7 @@ async def spx_tracking_message_handler(update: Update, context: ContextTypes.DEF
     msg = update.effective_message
     if not msg or not msg.text:
         return
-
+    print("Ma van don")
     spx_tn = spx.extract_spx_tracking_from_text(msg.text)
     if not spx_tn:
         await msg.reply_text(
@@ -2438,13 +2440,6 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CommandHandler("info", info_wrapper))
     application.add_handler(CommandHandler("changemail", changemail_wrapper))
     application.add_handler(CommandHandler("huyotp", huyotp_wrapper))
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            changemail_otp_message_handler,
-            block=False,
-        )
-    )
     application.add_handler(CallbackQueryHandler(start_callback_wrapper, pattern=r"^start_"))
     application.add_handler(CallbackQueryHandler(huyotp_callback_wrapper, pattern=r"^changemail_huyotp$"))
     application.add_handler(CommandHandler("cvc", cvc_wrapper))
@@ -2467,4 +2462,11 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(MessageHandler(spx_text_filter, spx_tracking_message_handler))
     application.add_handler(CallbackQueryHandler(ghn_callback_wrapper, pattern=r"^ghn_[dcrshw]\|"))
     application.add_handler(MessageHandler(ghn_text_filter, ghn_tracking_message_handler))
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            changemail_otp_message_handler,
+            block=False,
+        )
+    )
 
