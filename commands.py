@@ -7,9 +7,11 @@ import base64
 import html
 import io
 import re
+import time
 from shipping import spx, ghn
 import checkmvd
 import asyncio
+import uuid
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
@@ -30,6 +32,11 @@ from proxy_storage import (
     delete_user_proxies,
     get_user_best_proxy,
 )
+from otp_token_storage import (
+    save_user_otp_token,
+    get_user_otp_token,
+    delete_all_user_otp_tokens,
+)
 import login
 import login_qr
 from tg_supabase.telegram_users_db import save_user_on_start, get_telegram_user
@@ -48,6 +55,32 @@ _email_cache: dict[str, list] = {}
 # Lưu credential để refresh inbox theo job_id
 # Format: {job_id: {"email": "...", "password": "..."}}
 _email_creds: dict[str, dict[str, str]] = {}
+
+# Chờ OTP tay sau /changemail ... email@domain
+# Key: (chat_id, user_id) — value: spc_st, change_token, seed, email, proxies, expires_at (monotonic)
+_changemail_manual_pending: dict[tuple[int, int], dict] = {}
+_CHANGEMAIL_MANUAL_OTP_TTL_SEC = 900.0
+
+OTP_TOKEN_PROVIDERS: dict[str, tuple[str, str]] = {
+    "vitoken": ("viotp", "ViOTP"),
+    "bosstoken": ("bossotp", "BossOTP"),
+    "bowertoken": ("smsbower", "SmsBower"),
+    "otistoken": ("otistx", "OtisTX"),
+    "irontoken": ("ironsim", "IronSIM"),
+    "funtoken": ("funotp", "FunOTP"),
+    "chaycodetoken": ("chaycode", "ChayCode"),
+    "365token": ("365otp", "365OTP"),
+}
+
+
+def _changemail_last_arg_is_user_email(last: str) -> bool:
+    last = (last or "").strip()
+    if "@" not in last or "|" in last:
+        return False
+    local, _, domain = last.partition("@")
+    if not local or not domain or "." not in domain:
+        return False
+    return bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", last))
 
 
 def _empty_inbox_reply_markup(job_id: str) -> InlineKeyboardMarkup:
@@ -171,6 +204,325 @@ async def naptien_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg:
         return
     await msg.reply_text(NAPTIEN_HELP_TEXT, parse_mode="HTML")
+
+
+async def changemail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Đổi email Shopee: temp mail + đọc inbox (mặc định), hoặc email cuối + OTP tay.
+    Đầu vào: ``user|pass|sdt|SPC_F=...`` hoặc ``SPC_ST=...`` / giá trị SPC_ST;
+    thêm ``email@domain`` ở cuối để dùng email đó và nhập OTP trong tin nhắn kế tiếp.
+    """
+    if not update.message:
+        return
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("❌ Không lấy được thông tin user.")
+        return
+
+    user_id = user.id
+    args = list(context.args or [])
+    user_email: Optional[str] = None
+    if len(args) >= 2 and _changemail_last_arg_is_user_email(args[-1]):
+        user_email = (args[-1] or "").strip()
+        raw = " ".join(args[:-1]).strip()
+    else:
+        raw = " ".join(args).strip()
+
+    if not raw:
+        await update.message.reply_text(
+            "❌ Thiếu tham số.\n"
+            "Cú pháp:\n"
+            "<code>/changemail user|pass|sdt|SPC_F=...</code>\n"
+            "hoặc <code>/changemail SPC_ST=...</code> / chỉ giá trị <code>SPC_ST</code>\n\n"
+            "<b>Email tự nhập + OTP tay:</b>\n"
+            "<code>/changemail …credentials… bạn@email.com</code>\n"
+            "Shopee gửi OTP tới <code>bạn@email.com</code>; bạn gửi mã <b>6 số</b> ở tin nhắn tiếp theo.\n"
+            "Muốn hủy khi đang chờ OTP: <code>/huyotp</code>.\n\n"
+            "<i>Không thêm email ở cuối: bot tạo inbox temp và đọc OTP tự động.</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    proxies, _src = get_user_best_proxy(user_id)
+    if not proxies:
+        await update.message.reply_text(
+            "❌ Cần cấu hình proxy (<code>/kipx</code> hoặc <code>/vnpx</code>) trước.",
+            parse_mode="HTML",
+        )
+        return
+
+    from mail.api import register_email_full
+    from mail.change_mail import (
+        change_mail_auto,
+        change_mail_prepare_manual_otp,
+        clean_spc_st,
+    )
+
+    chat_id = update.effective_chat.id
+    processing_msg = await update.message.reply_text(
+        "⏳ Đang xử lý…"
+    )
+
+    try:
+        spc_st_val: Optional[str] = None
+
+        if "|" in raw and "SPC_F" in raw.upper():
+            try:
+                spc_st_val = await asyncio.to_thread(
+                    login.extract_spc_st, raw, proxies
+                )
+            except ValueError as e:
+                await update.message.reply_text(
+                    "❌ <b>Lấy SPC_ST thất bại</b>\n\n"
+                    f"{html.escape(str(e))}\n\n"
+                    "<i>Cần:</i> <code>user|pass|sdt|SPC_F=...</code>",
+                    parse_mode="HTML",
+                )
+                return
+            except Exception as e:
+                await update.message.reply_text(
+                    "❌ <b>Lấy SPC_ST thất bại</b>\n\n"
+                    f"<code>{html.escape(str(e))}</code>",
+                    parse_mode="HTML",
+                )
+                return
+            if not spc_st_val or not str(spc_st_val).strip():
+                await update.message.reply_text(
+                    "❌ Shopee không trả về <code>SPC_ST</code>.",
+                    parse_mode="HTML",
+                )
+                return
+        elif "SPC_ST=" in raw.upper():
+            spc_st_val = clean_spc_st(raw)
+        elif "|" not in raw:
+            spc_st_val = clean_spc_st(raw.strip())
+        else:
+            await update.message.reply_text(
+                "❌ Định dạng không hợp lệ.\n"
+                "<code>user|pass|sdt|SPC_F=...</code> hoặc <code>SPC_ST=...</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        if not spc_st_val or not str(spc_st_val).strip():
+            await update.message.reply_text(
+                "❌ <code>SPC_ST</code> rỗng sau khi xử lý.",
+                parse_mode="HTML",
+            )
+            return
+
+        spc_st_str = str(spc_st_val).strip()
+
+        if user_email:
+            try:
+                await processing_msg.edit_text(
+                    f"⏳ Đang gửi OTP Shopee tới <code>{html.escape(user_email)}</code>…",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+            prep = await asyncio.to_thread(
+                lambda: change_mail_prepare_manual_otp(
+                    spc_st_str, user_email, proxies=proxies
+                )
+            )
+
+            if not prep.get("ok"):
+                err = html.escape(str(prep.get("error") or "Lỗi không xác định"))
+                await update.message.reply_text(
+                    f"❌ <b>Không gửi được bước đổi email / OTP</b>\n\n{err}",
+                    parse_mode="HTML",
+                )
+                return
+
+            key = (chat_id, user_id)
+            _changemail_manual_pending[key] = {
+                "spc_st": spc_st_str,
+                "change_token": prep["change_token"],
+                "seed": prep["seed"],
+                "email": user_email,
+                "proxies": proxies,
+                "expires_at": time.monotonic() + _CHANGEMAIL_MANUAL_OTP_TTL_SEC,
+            }
+            await update.message.reply_text(
+                "📩 Shopee đã gửi OTP tới "
+                f"<code>{html.escape(user_email)}</code>.\n\n"
+                "Gửi <b>mã 6 chữ số</b> trong <b>tin nhắn tiếp theo</b> (chỉ cần số hoặc kèm chữ, "
+                "bot lấy đúng một cụm 6 số).\n"
+                "Muốn hủy: gửi <code>/huyotp</code> (bot dừng chờ OTP; không gọi Shopee hủy).\n\n"
+                f"<i>Hết hạn sau ~{int(_CHANGEMAIL_MANUAL_OTP_TTL_SEC // 60)} phút.</i>",
+                parse_mode="HTML",
+            )
+            return
+
+        try:
+            await processing_msg.edit_text(
+                "⏳ Đang tạo email temp…"
+            )
+        except Exception:
+            pass
+
+        new_mail, mail_pass, reg_result = await asyncio.to_thread(
+            register_email_full, "", "", None, proxies
+        )
+        if (
+            not new_mail
+            or not mail_pass
+            or not isinstance(reg_result, dict)
+            or reg_result.get("response_code") != 200
+        ):
+            err_raw = (
+                (reg_result or {}).get("message")
+                or (reg_result or {}).get("error")
+                or "Không tạo được email"
+            )
+            await update.message.reply_text(
+                f"❌ Không tạo được email temp.\n<code>{html.escape(str(err_raw)[:500])}</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        try:
+            await processing_msg.edit_text(
+                "⏳ Đang gửi OTP Shopee và chờ mail (có thể 1–3 phút)..."
+            )
+        except Exception:
+            pass
+
+        result = await asyncio.to_thread(
+            lambda: change_mail_auto(
+                spc_st_str,
+                new_mail,
+                mail_pass,
+                proxies=proxies,
+            )
+        )
+
+        if result.get("ok"):
+            job_id = str(uuid.uuid4())
+            _email_creds[job_id] = {
+                "email": new_mail.strip(),
+                "password": mail_pass.strip(),
+            }
+            em = html.escape(new_mail)
+            pw = html.escape(mail_pass)
+            changemail_reply_markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            text="📩 Đọc email",
+                            callback_data=f"email_read_{job_id}",
+                        ),
+                        InlineKeyboardButton(
+                            text="ℹ️ Thông tin email",
+                            callback_data=f"email_info_{job_id}",
+                        ),
+                    ],
+                ]
+            )
+            await update.message.reply_text(
+                "✅ <b>Đổi email Shopee thành công</b>\n\n"
+                f"📧 Email mới: <code>{em}</code>\n"
+                f"🔑 Mật khẩu inbox: <code>{pw}</code>\n"
+                f"📋 <code>{em}|{pw}</code>\n\n"
+                "<i>Chạm nút bên dưới để đọc inbox (giống /addmail, /newmail).</i>",
+                parse_mode="HTML",
+                reply_markup=changemail_reply_markup,
+            )
+        else:
+            err = html.escape(str(result.get("error") or "Lỗi không xác định"))
+            em = html.escape(new_mail)
+            pw = html.escape(mail_pass)
+            await update.message.reply_text(
+                "❌ <b>Đổi email thất bại</b>\n\n"
+                f"{err}\n\n"
+                f"<i>Email đã tạo (có thể dùng đọc thư):</i>\n"
+                f"<code>{em}</code> | <code>{pw}</code>",
+                parse_mode="HTML",
+            )
+    finally:
+        try:
+            await context.bot.delete_message(
+                chat_id=chat_id, message_id=processing_msg.message_id
+            )
+        except Exception:
+            pass
+
+
+async def changemail_otp_message_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """Nhận OTP 6 số sau khi user dùng /changemail … email@domain."""
+    msg = update.message
+    user = update.effective_user
+    if not msg or not user:
+        return
+    key = (update.effective_chat.id, user.id)
+    pending = _changemail_manual_pending.get(key)
+    if not pending:
+        return
+    if time.monotonic() > pending["expires_at"]:
+        _changemail_manual_pending.pop(key, None)
+        await msg.reply_text(
+            "❌ Hết thời gian chờ OTP. Chạy lại "
+            "<code>/changemail … email@domain</code>.",
+            parse_mode="HTML",
+        )
+        return
+    text = (msg.text or "").strip()
+    m = re.search(r"(?<!\d)(\d{6})(?!\d)", text)
+    if not m:
+        return
+    otp = m.group(1)
+    from mail.change_mail import change_mail_finish_manual_otp
+
+    result = await asyncio.to_thread(
+        lambda: change_mail_finish_manual_otp(
+            pending["spc_st"],
+            pending["email"],
+            pending["change_token"],
+            pending["seed"],
+            otp,
+            proxies=pending["proxies"],
+        )
+    )
+    _changemail_manual_pending.pop(key, None)
+    if result.get("ok"):
+        em = html.escape(str(result.get("new_email") or pending["email"]))
+        await msg.reply_text(
+            f"✅ <b>Đổi email Shopee thành công</b>\n\n📧 Email mới: <code>{em}</code>",
+            parse_mode="HTML",
+        )
+    else:
+        err = html.escape(str(result.get("error") or "Lỗi không xác định"))
+        await msg.reply_text(
+            f"❌ <b>Xác thực OTP / đổi email thất bại</b>\n\n{err}\n\n"
+            "<i>Có thể chạy lại /changemail kèm email ở cuối.</i>",
+            parse_mode="HTML",
+        )
+
+
+async def huyotp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Hủy trạng thái chờ OTP sau /changemail … email@domain."""
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not user:
+        return
+    key = (update.effective_chat.id, user.id)
+    if key not in _changemail_manual_pending:
+        await msg.reply_text(
+            "ℹ️ Hiện không có phiên chờ OTP đổi email để hủy.\n"
+            "<i>Chỉ dùng sau khi bot báo đã gửi OTP và đang chờ bạn gửi mã 6 số.</i>",
+            parse_mode="HTML",
+        )
+        return
+    _changemail_manual_pending.pop(key, None)
+    await msg.reply_text(
+        "✅ Đã hủy chờ OTP trên bot.\n"
+        "Muốn đổi email lại (OTP tay), chạy <code>/changemail … email@domain</code>.",
+        parse_mode="HTML",
+    )
 
 
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1275,7 +1627,7 @@ async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         if not email or not password:
             try:
                 await query.edit_message_text(
-                    text="❌ Không có thông tin mail. Vui lòng gọi lại <code>/checkmail</code>, <code>/mailfree</code> hoặc <code>/newmail</code>.",
+                    text="❌ Không có thông tin mail. Vui lòng gọi lại <code>/checkmail</code>, <code>/mailfree</code>, <code>/newmail</code> hoặc <code>/changemail</code>.",
                     parse_mode="HTML",
                 )
             except BadRequest:
@@ -1324,6 +1676,72 @@ async def queue_status(update: Update, context: ContextTypes.DEFAULT_TYPE, job_q
         f"\u2022 Pending jobs: {queue_size}\n"
         f"\u2022 Active jobs: {active_jobs}\n"
         f"\u2022 Workers: {job_queue.max_workers}"
+    )
+
+
+async def otp_provider_token_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lưu/xem token cho provider OTP theo command hiện tại."""
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not user:
+        return
+
+    cmd_name = (msg.text or "").split()[0].lstrip("/").split("@")[0].lower()
+    meta = OTP_TOKEN_PROVIDERS.get(cmd_name)
+    if not meta:
+        await msg.reply_text("❌ Command token không được hỗ trợ.")
+        return
+
+    provider_key, provider_label = meta
+    if not context.args:
+        existing = get_user_otp_token(user.id, provider_key)
+        if not existing:
+            await msg.reply_text(
+                f"📭 Bạn chưa lưu token {provider_label}.\n"
+                "Lưu bằng cú pháp:\n"
+                f"<code>/{cmd_name} TOKEN</code>",
+                parse_mode="HTML",
+            )
+            return
+        await msg.reply_text(
+            f"🔑 Token {provider_label} hiện tại của bạn là:\n"
+            f"<code>{existing}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    token = " ".join(context.args).strip()
+    if not token:
+        await msg.reply_text(
+            "❌ Token không hợp lệ.\n"
+            f"Cú pháp: <code>/{cmd_name} TOKEN</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    save_user_otp_token(user.id, provider_key, token)
+    await msg.reply_text(
+        f"✅ Đã lưu token {provider_label} cho bạn.\n"
+        f"Bạn có thể xem lại bằng lệnh: <code>/{cmd_name}</code>",
+        parse_mode="HTML",
+    )
+
+
+async def deltoken_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xóa toàn bộ token OTP providers của user hiện tại."""
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not user:
+        return
+
+    deleted = delete_all_user_otp_tokens(user.id)
+    if not deleted:
+        await msg.reply_text("ℹ️ Không có token OTP nào để xóa.", parse_mode="HTML")
+        return
+
+    await msg.reply_text(
+        "🗑️ Đã xóa toàn bộ token OTP providers của bạn.",
+        parse_mode="HTML",
     )
 
 
@@ -1961,6 +2379,12 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     async def info_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await info_command(update, context)
 
+    async def changemail_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await changemail_command(update, context)
+
+    async def huyotp_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await huyotp_command(update, context)
+
     # Tin nhắn bắt đầu bằng SPX hoặc VN → tra SPX (không phải lệnh /...)
     spx_text_filter = (
         filters.TEXT
@@ -1979,6 +2403,15 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CommandHandler("start", start_wrapper))
     application.add_handler(CommandHandler("naptien", naptien_wrapper))
     application.add_handler(CommandHandler("info", info_wrapper))
+    application.add_handler(CommandHandler("changemail", changemail_wrapper))
+    application.add_handler(CommandHandler("huyotp", huyotp_wrapper))
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            changemail_otp_message_handler,
+            block=False,
+        )
+    )
     application.add_handler(CallbackQueryHandler(start_callback_wrapper, pattern=r"^start_"))
     application.add_handler(CommandHandler("cvc", cvc_wrapper))
     application.add_handler(CommandHandler("cks", cks_wrapper))
@@ -1991,6 +2424,9 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CommandHandler("kipx", kipx_command))
     application.add_handler(CommandHandler("vnpx", vnpx_command))
     application.add_handler(CommandHandler("delpx", delpx_command))
+    for token_cmd in OTP_TOKEN_PROVIDERS:
+        application.add_handler(CommandHandler(token_cmd, otp_provider_token_command))
+    application.add_handler(CommandHandler("deltoken", deltoken_command))
     application.add_handler(CommandHandler("vc", vc_wrapper))
     application.add_handler(CallbackQueryHandler(email_callback_wrapper, pattern="^email_"))
     application.add_handler(CallbackQueryHandler(spx_callback_wrapper, pattern=r"^spx_[dcrshw]\|"))
