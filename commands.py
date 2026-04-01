@@ -232,13 +232,14 @@ async def changemail_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(
             "❌ Thiếu tham số.\n"
             "Cú pháp:\n"
-            "<code>/changemail user|pass|sdt|SPC_F=...</code>\n"
-            "hoặc <code>/changemail SPC_ST=...</code> / chỉ giá trị <code>SPC_ST</code>\n\n"
+            "<b>Email tự động:</b>\n"
+            "<code>/changemail id|pass|sdt|spc_f</code>\n"
+            "hoặc <code>/changemail SPC_ST=...</code>\n\n"
             "<b>Email tự nhập + OTP tay:</b>\n"
-            "<code>/changemail …credentials… bạn@email.com</code>\n"
+            "<code>/changemail id|pass|sdt|spc_f + khoảng trắng + email_cua_ban</code>\n"
+            "hoặc <code>/changemail SPC_ST=...+ khoảng trắng + email_cua_ban</code>\n\n"
             "Shopee gửi OTP tới <code>bạn@email.com</code>; bạn gửi mã <b>6 số</b> ở tin nhắn tiếp theo.\n"
-            "Muốn hủy khi đang chờ OTP: <code>/huyotp</code>.\n\n"
-            "<i>Không thêm email ở cuối: bot tạo inbox temp và đọc OTP tự động.</i>",
+            "Muốn hủy khi đang chờ OTP: <code>/huyotp</code> hoặc bấm nút Hủy OTP.\n\n",
             parse_mode="HTML",
         )
         return
@@ -345,6 +346,16 @@ async def changemail_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "proxies": proxies,
                 "expires_at": time.monotonic() + _CHANGEMAIL_MANUAL_OTP_TTL_SEC,
             }
+            cancel_otp_markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            text="❌ Hủy OTP",
+                            callback_data="changemail_huyotp",
+                        )
+                    ]
+                ]
+            )
             await update.message.reply_text(
                 "📩 Shopee đã gửi OTP tới "
                 f"<code>{html.escape(user_email)}</code>.\n\n"
@@ -353,6 +364,7 @@ async def changemail_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "Muốn hủy: gửi <code>/huyotp</code> (bot dừng chờ OTP; không gọi Shopee hủy).\n\n"
                 f"<i>Hết hạn sau ~{int(_CHANGEMAIL_MANUAL_OTP_TTL_SEC // 60)} phút.</i>",
                 parse_mode="HTML",
+                reply_markup=cancel_otp_markup,
             )
             return
 
@@ -519,6 +531,24 @@ async def huyotp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     _changemail_manual_pending.pop(key, None)
     await msg.reply_text(
+        "✅ Đã hủy chờ OTP trên bot.\n"
+        "Muốn đổi email lại (OTP tay), chạy <code>/changemail … email@domain</code>.",
+        parse_mode="HTML",
+    )
+
+
+async def huyotp_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Hủy trạng thái chờ OTP khi user bấm nút inline."""
+    query = update.callback_query
+    if not query or not query.message or not query.from_user:
+        return
+    key = (query.message.chat_id, query.from_user.id)
+    if key not in _changemail_manual_pending:
+        await query.answer("Không có phiên OTP để hủy.", show_alert=False)
+        return
+    _changemail_manual_pending.pop(key, None)
+    await query.answer("Đã hủy OTP.", show_alert=False)
+    await query.message.reply_text(
         "✅ Đã hủy chờ OTP trên bot.\n"
         "Muốn đổi email lại (OTP tay), chạy <code>/changemail … email@domain</code>.",
         parse_mode="HTML",
@@ -2385,6 +2415,9 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     async def huyotp_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await huyotp_command(update, context)
 
+    async def huyotp_callback_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await huyotp_callback_handler(update, context)
+
     # Tin nhắn bắt đầu bằng SPX hoặc VN → tra SPX (không phải lệnh /...)
     spx_text_filter = (
         filters.TEXT
@@ -2413,6 +2446,7 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
         )
     )
     application.add_handler(CallbackQueryHandler(start_callback_wrapper, pattern=r"^start_"))
+    application.add_handler(CallbackQueryHandler(huyotp_callback_wrapper, pattern=r"^changemail_huyotp$"))
     application.add_handler(CommandHandler("cvc", cvc_wrapper))
     application.add_handler(CommandHandler("cks", cks_wrapper))
     application.add_handler(CommandHandler("qr", qr_wrapper))
