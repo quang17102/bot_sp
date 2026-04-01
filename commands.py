@@ -128,7 +128,7 @@ def _format_expires_vn(expires_raw: Optional[str]) -> str:
 
 
 START_GUIDE_TELEGRAPH_URL = (
-    "https://telegra.ph/H%C6%B0%E1%BB%9Bng-D%E1%BA%ABn-S%E1%BB%AD-D%E1%BB%A5ng-Bot-03-31"
+    "https://telegra.ph/Gi%E1%BB%9Bi-Thi%E1%BB%87u-BOT-03-31"
 )
 
 
