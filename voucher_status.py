@@ -41,12 +41,12 @@ VOUCHER_BATCH_LIST_HARDCODED: List[Dict[str, Any]] = [
         "voucher_code": "CRMWBZ0426A",
         "signature": "739bef100470de02b9ba0b0ac1643d6f437c8ddececb937ce2dfb168230f5e72",
     },
-    # {
-    #     "ten_ma": "100.000đ | Đơn 0đ",
-    #     "promotionid": 1364961121046528,
-    #     "voucher_code": "CRM19032503NBCP80K",
-    #     "signature": "3e4dc9053e0511d842d8faca0f42ec2b8c9afa204ac5aa91848478216260a050",
-    # },
+    {
+        "ten_ma": "100.000đ | Đơn 0đ",
+        "promotionid": 1384552725385216,
+        "voucher_code": "CRMNUICLHCMT4",
+        "signature": "d6278ea1f401f2483fb7a8d363b5d97983d9ede8815549f001bf22fd7c650cba",
+    },
     # {
     #     "ten_ma": "100.000đ | Đơn 0đ",
     #     "promotionid": 1364240113766400,
