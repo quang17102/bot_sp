@@ -60,6 +60,17 @@ _email_creds: dict[str, dict[str, str]] = {}
 # Key: (chat_id, user_id) — value: spc_st, change_token, seed, email, proxies, expires_at (monotonic)
 _changemail_manual_pending: dict[tuple[int, int], dict] = {}
 _CHANGEMAIL_MANUAL_OTP_TTL_SEC = 900.0
+# Chống spam: mỗi user chỉ được gọi /changemail sau khoảng cách tối thiểu (giây, monotonic)
+_CHANGEMAIL_COOLDOWN_SEC = 90.0
+_changemail_next_allowed_at: dict[int, float] = {}
+# Một user chỉ một /changemail chạy tại một thời điểm (không chồng, không xếp hàng)
+_changemail_user_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_changemail_lock(user_id: int) -> asyncio.Lock:
+    if user_id not in _changemail_user_locks:
+        _changemail_user_locks[user_id] = asyncio.Lock()
+    return _changemail_user_locks[user_id]
 
 OTP_TOKEN_PROVIDERS: dict[str, tuple[str, str]] = {
     "vitoken": ("viotp", "ViOTP"),
@@ -259,12 +270,24 @@ async def changemail_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         clean_spc_st,
     )
 
-    chat_id = update.effective_chat.id
-    processing_msg = await update.message.reply_text(
-        "⏳ Đang xử lý…"
-    )
-
+    lock = _get_changemail_lock(user_id)
     try:
+        await asyncio.wait_for(lock.acquire(), timeout=0)
+    except asyncio.TimeoutError:
+        await update.message.reply_text(
+            "⏳ Đang có lệnh <code>/changemail</code> khác đang chạy cho bạn.\n"
+            "<i>Vui lòng đợi xong hoặc hủy OTP (nếu đang chờ OTP) rồi thử lại.</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    chat_id = update.effective_chat.id
+    processing_msg = None
+    try:
+        processing_msg = await update.message.reply_text(
+            "⏳ Đang xử lý…"
+        )
+
         spc_st_val: Optional[str] = None
 
         if "|" in raw and "SPC_F" in raw.upper():
@@ -313,6 +336,27 @@ async def changemail_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         spc_st_str = str(spc_st_val).strip()
+
+        now = time.monotonic()
+        if (chat_id, user_id) in _changemail_manual_pending:
+            await update.message.reply_text(
+                "⏳ Bạn đang chờ OTP đổi email. Nhập mã 6 số, hoặc gửi <code>/huyotp</code>, "
+                "hoặc bấm nút <b>Hủy OTP</b>.\n"
+                "<i>Sau đó mới chạy lại /changemail.</i>",
+                parse_mode="HTML",
+            )
+            return
+
+        next_at = _changemail_next_allowed_at.get(user_id, 0.0)
+        if now < next_at:
+            wait_sec = max(1, int(next_at - now + 0.999))
+            await update.message.reply_text(
+                f"⏳ <b>Chống spam:</b> vui lòng đợi thêm <b>{wait_sec}</b> giây rồi dùng lại /changemail.",
+                parse_mode="HTML",
+            )
+            return
+
+        _changemail_next_allowed_at[user_id] = now + _CHANGEMAIL_COOLDOWN_SEC
 
         if user_email:
             try:
@@ -454,12 +498,14 @@ async def changemail_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 parse_mode="HTML",
             )
     finally:
-        try:
-            await context.bot.delete_message(
-                chat_id=chat_id, message_id=processing_msg.message_id
-            )
-        except Exception:
-            pass
+        if processing_msg is not None:
+            try:
+                await context.bot.delete_message(
+                    chat_id=chat_id, message_id=processing_msg.message_id
+                )
+            except Exception:
+                pass
+        lock.release()
 
 
 async def changemail_otp_message_handler(
@@ -971,6 +1017,13 @@ async def check_job_status(chat_id: int, job_id: str, job_queue: JobQueue, bot_a
                     parse_mode='HTML',
                     reply_markup=reply_markup,
                 )
+                for extra in result.get("vc_extra_chunks") or []:
+                    if extra:
+                        await bot_app.bot.send_message(
+                            chat_id=chat_id,
+                            text=extra,
+                            parse_mode="HTML",
+                        )
                 store_creds = result.get("store_creds")  # cookie_text = "SPC_ST=..."
             cookie_for_orders = result.get("store_creds")
             if job.job_type in ("cks", "qr") and isinstance(cookie_for_orders, str) and cookie_for_orders.startswith("SPC_ST="):
@@ -1911,11 +1964,15 @@ async def delpx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def vc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def vc_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    job_queue: JobQueue,
+    bot_app: 'Application',
+):
     """
-    Lưu batch voucher mall: ``user|pass|sdt|SPC_F=...`` → lấy SPC_ST qua proxy,
-    hoặc ``SPC_ST=...`` / chỉ giá trị SPC_ST. Gọi ``save_voucher_batch`` với
-    ``VOUCHER_BATCH_LIST_HARDCODED`` (proxy bắt buộc).
+    Lưu batch voucher mall qua job queue: một user chỉ một job ``vc`` pending/processing.
+    Worker: ``handle_vc`` (login / SPC_ST + ``save_voucher_batch``).
     """
     if not update.message:
         return
@@ -1925,6 +1982,7 @@ async def vc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = user.id
+    chat_id = update.effective_chat.id
     raw = " ".join(context.args or []).strip()
     if not raw:
         await update.message.reply_text(
@@ -1944,110 +2002,39 @@ async def vc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    chat_id = update.effective_chat.id
-    processing_msg = await update.message.reply_text("⏳ Đang xử lý...")
+    job_id = job_queue.add_job_if_no_active(
+        job_type="vc",
+        user_id=user_id,
+        chat_id=chat_id,
+        data={"raw": raw},
+    )
 
-    try:
-        from save_voucher import format_vc_telegram_html, save_voucher_batch
-        from voucher_status import VOUCHER_BATCH_LIST_HARDCODED
-
-        cookie_header: Optional[str] = None
-
-        if "|" in raw and "SPC_F" in raw.upper():
-            try:
-                spc_st_val = await asyncio.to_thread(login.extract_spc_st, raw, proxies)
-            except ValueError as e:
-                await update.message.reply_text(
-                    "❌ <b>Lấy cookie SPC_ST thất bại</b>\n\n"
-                    f"Định dạng hoặc thiếu trường: {html.escape(str(e))}\n\n"
-                    "<i>Cần đúng:</i> <code>user|pass|sdt|SPC_F=...</code>",
-                    parse_mode="HTML",
-                )
-                return
-            except Exception as e:
-                detail = html.escape(str(e))
-                await update.message.reply_text(
-                    "❌ <b>Lấy cookie SPC_ST thất bại</b>\n\n"
-                    f"Chi tiết: <code>{detail}</code>\n\n"
-                    "<i>Gợi ý:</i> kiểm tra user, mật khẩu, <code>SPC_F</code> còn hiệu lực; "
-                    "thử proxy khác (<code>/kipx</code>, <code>/vnpx</code>); "
-                    "hoặc gửi sẵn <code>SPC_ST=...</code> nếu đã có cookie.",
-                    parse_mode="HTML",
-                )
-                return
-            if not spc_st_val or not str(spc_st_val).strip():
-                await update.message.reply_text(
-                    "❌ <b>Lấy cookie SPC_ST thất bại</b>\n\n"
-                    "Shopee không trả về <code>SPC_ST</code> (chuỗi rỗng). "
-                    "Thử đăng nhập lại trên web/app để lấy <code>SPC_F</code> mới.",
-                    parse_mode="HTML",
-                )
-                return
-            cookie_header = f"SPC_ST={spc_st_val}"
-        elif "SPC_ST=" in raw.upper():
-            cookie_header = raw.strip()
-        elif "|" not in raw:
-            st_only = raw.strip()
-            if not st_only:
-                await update.message.reply_text(
-                    "❌ Thiếu giá trị <code>SPC_ST</code>.",
-                    parse_mode="HTML",
-                )
-                return
-            cookie_header = f"SPC_ST={st_only}"
+    if job_id is None:
+        active_job = job_queue.get_active_job_for_user(user_id, job_type="vc")
+        if active_job:
+            status_text = "đang chờ" if active_job.status == "pending" else "đang xử lý"
+            await update.message.reply_text(
+                f"⏸️ Bạn đã có job /vc đang {status_text}!\n"
+                f"📋 Job ID: {active_job.job_id[:8]}\n"
+                f"⏳ Trạng thái: {active_job.status}\n"
+                "Vui lòng đợi job hiện tại hoàn thành rồi gọi lại /vc."
+            )
         else:
             await update.message.reply_text(
-                "❌ Định dạng không hợp lệ.\n"
-                "Dùng: <code>user|pass|sdt|SPC_F=...</code> hoặc <code>SPC_ST=...</code>",
-                parse_mode="HTML",
+                "⏸️ Bạn đã có job /vc đang xử lý. Vui lòng đợi hoàn thành."
             )
-            return
+        return
 
-        ch = (cookie_header or "").strip()
-        if ch.upper().startswith("SPC_ST="):
-            _st_val = ch.split("=", 1)[-1].strip()
-            if not _st_val:
-                await update.message.reply_text(
-                    "❌ <b>Lấy cookie SPC_ST thất bại</b>\n\n"
-                    "Giá trị sau <code>SPC_ST=</code> đang trống.",
-                    parse_mode="HTML",
-                )
-                return
-
-        cookie_header = ch
-        spc_st_esc = html.escape(cookie_header)
-
-        results = await asyncio.to_thread(
-            save_voucher_batch,
-            VOUCHER_BATCH_LIST_HARDCODED,
-            cookie_header=cookie_header,
-            csrftoken=None,
-            proxies=proxies,
+    processing_msg = await update.message.reply_text("⏳ Đang xử lý...")
+    asyncio.create_task(
+        check_job_status(
+            chat_id,
+            job_id,
+            job_queue,
+            bot_app,
+            processing_msg.message_id,
         )
-
-        body = format_vc_telegram_html(results)
-        text = (
-            "✅ <b>Login thành công!</b>\n\n"
-            f"<code>{spc_st_esc}</code>\n\n"
-            "📝 <b>KẾT QUẢ LƯU VOUCHER</b>\n\n"
-            f"{body}"
-        )
-
-        if len(text) <= 4096:
-            await update.message.reply_text(text, parse_mode="HTML")
-        else:
-            chunk0 = text[:4096]
-            rest = text[4096:]
-            await update.message.reply_text(chunk0, parse_mode="HTML")
-            for i in range(0, len(rest), 4096):
-                await update.message.reply_text(rest[i : i + 4096], parse_mode="HTML")
-    finally:
-        try:
-            await context.bot.delete_message(
-                chat_id=chat_id, message_id=processing_msg.message_id
-            )
-        except Exception:
-            pass
+    )
 
 
 def build_spx_inline_keyboard(spx_tn: str, *, expanded: bool) -> InlineKeyboardMarkup:
@@ -2397,7 +2384,7 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
         await ghn_callback_handler(update, context)
 
     async def vc_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await vc_command(update, context)
+        await vc_command(update, context, job_queue, application)
 
     async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_command(update, context)

@@ -6,7 +6,16 @@ Ch\u1EE9a job queue setup v\u00E0 bot initialization
 
 from telegram.ext import ApplicationBuilder
 from job_queue import JobQueue
-from workers import handle_cvc, handle_cks, handle_checkmail, handle_mailfree, handle_addmail, handle_newmail, handle_qr
+from workers import (
+    handle_cvc,
+    handle_vc,
+    handle_cks,
+    handle_checkmail,
+    handle_mailfree,
+    handle_addmail,
+    handle_newmail,
+    handle_qr,
+)
 from commands import setup_commands
 
 # TOKEN = "8779407961:AAEmCsWPOpjUueWc7uH8HsDhwPfVcV4hjwY"
@@ -20,6 +29,7 @@ def main():
     
     # \u0110\u0103ng k\u00FD worker handlers
     job_queue.register_handler("cvc", handle_cvc)
+    job_queue.register_handler("vc", handle_vc)
     job_queue.register_handler("cks", handle_cks)
     job_queue.register_handler("qr", handle_qr)
     job_queue.register_handler("checkmail", handle_checkmail)

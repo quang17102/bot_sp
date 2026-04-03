@@ -8,7 +8,7 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from job_queue import Job
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 from mail import api as email_api
 from mail import utils as email_utils
 from mail.utils import process_mailfree
@@ -20,6 +20,7 @@ from voucher_status import (
     fetch_voucher_batch_parallel,
     format_batch_cards_telegram_html,
 )
+from save_voucher import format_vc_telegram_html, save_voucher_batch
 from proxy_storage import get_user_best_proxy
 
 # Giờ Việt Nam (UTC+7, không DST)
@@ -148,6 +149,155 @@ def handle_cvc(job: Job) -> Dict[str, Any]:
             "input_received": input_data,
             "all_args": args,
         }
+
+
+def _vc_chunk_message(text: str, limit: int = 4096) -> tuple[str, List[str]]:
+    """Chia nội dung HTML cho Telegram (giống logic cũ trong vc_command)."""
+    if len(text) <= limit:
+        return text, []
+    return text[:limit], [text[i : i + limit] for i in range(limit, len(text), limit)]
+
+
+def handle_vc(job: Job) -> Dict[str, Any]:
+    """
+    Job /vc: lấy SPC_ST (login hoặc có sẵn) + save_voucher_batch.
+    Chạy trong worker thread; proxy lấy theo user_id.
+    """
+    user_id = job.user_id
+    raw = (job.data.get("raw") or "").strip()
+
+    if not raw:
+        return {
+            "status": "success",
+            "message": (
+                "❌ Thiếu tham số.\n"
+                "Cú pháp:\n"
+                "<code>/vc user|pass|sdt|SPC_F=...</code>\n"
+                "hoặc <code>/vc SPC_ST=...</code> / chỉ giá trị SPC_ST"
+            ),
+            "message_format": "HTML",
+        }
+
+    proxies, _src = get_user_best_proxy(user_id)
+    if not proxies:
+        return {
+            "status": "success",
+            "message": (
+                "❌ Cần cấu hình proxy (<code>/kipx</code> hoặc <code>/vnpx</code>) trước."
+            ),
+            "message_format": "HTML",
+        }
+
+    cookie_header: Optional[str] = None
+
+    try:
+        if "|" in raw and "SPC_F" in raw.upper():
+            try:
+                spc_st_val = login.extract_spc_st(raw, proxies)
+            except ValueError as e:
+                return {
+                    "status": "success",
+                    "message": (
+                        "❌ <b>Lấy cookie SPC_ST thất bại</b>\n\n"
+                        f"Định dạng hoặc thiếu trường: {html.escape(str(e))}\n\n"
+                        "<i>Cần đúng:</i> <code>user|pass|sdt|SPC_F=...</code>"
+                    ),
+                    "message_format": "HTML",
+                }
+            except Exception as e:
+                detail = html.escape(str(e))
+                return {
+                    "status": "success",
+                    "message": (
+                        "❌ <b>Lấy cookie SPC_ST thất bại</b>\n\n"
+                        f"Chi tiết: <code>{detail}</code>\n\n"
+                        "<i>Gợi ý:</i> kiểm tra user, mật khẩu, <code>SPC_F</code> còn hiệu lực; "
+                        "thử proxy khác (<code>/kipx</code>, <code>/vnpx</code>); "
+                        "hoặc gửi sẵn <code>SPC_ST=...</code> nếu đã có cookie."
+                    ),
+                    "message_format": "HTML",
+                }
+            if not spc_st_val or not str(spc_st_val).strip():
+                return {
+                    "status": "success",
+                    "message": (
+                        "❌ <b>Lấy cookie SPC_ST thất bại</b>\n\n"
+                        "Shopee không trả về <code>SPC_ST</code> (chuỗi rỗng). "
+                        "Thử đăng nhập lại trên web/app để lấy <code>SPC_F</code> mới."
+                    ),
+                    "message_format": "HTML",
+                }
+            cookie_header = f"SPC_ST={spc_st_val}"
+        elif "SPC_ST=" in raw.upper():
+            cookie_header = raw.strip()
+        elif "|" not in raw:
+            st_only = raw.strip()
+            if not st_only:
+                return {
+                    "status": "success",
+                    "message": "❌ Thiếu giá trị <code>SPC_ST</code>.",
+                    "message_format": "HTML",
+                }
+            cookie_header = f"SPC_ST={st_only}"
+        else:
+            return {
+                "status": "success",
+                "message": (
+                    "❌ Định dạng không hợp lệ.\n"
+                    "Dùng: <code>user|pass|sdt|SPC_F=...</code> hoặc <code>SPC_ST=...</code>"
+                ),
+                "message_format": "HTML",
+            }
+
+        ch = (cookie_header or "").strip()
+        if ch.upper().startswith("SPC_ST="):
+            _st_val = ch.split("=", 1)[-1].strip()
+            if not _st_val:
+                return {
+                    "status": "success",
+                    "message": (
+                        "❌ <b>Lấy cookie SPC_ST thất bại</b>\n\n"
+                        "Giá trị sau <code>SPC_ST=</code> đang trống."
+                    ),
+                    "message_format": "HTML",
+                }
+        cookie_header = ch
+        spc_st_esc = html.escape(cookie_header)
+
+        results = save_voucher_batch(
+            VOUCHER_BATCH_LIST_HARDCODED,
+            cookie_header=cookie_header,
+            csrftoken=None,
+            proxies=proxies,
+        )
+
+        body = format_vc_telegram_html(results)
+        text = (
+            "✅ <b>Login thành công!</b>\n\n"
+            f"<code>{spc_st_esc}</code>\n\n"
+            "📝 <b>KẾT QUẢ LƯU VOUCHER</b>\n\n"
+            f"{body}"
+        )
+
+        first, rest = _vc_chunk_message(text)
+        return {
+            "status": "success",
+            "message": first,
+            "message_format": "HTML",
+            "vc_extra_chunks": rest,
+            "user_id": user_id,
+            "chat_id": job.chat_id,
+        }
+    except Exception as e:
+        print(f"Error handle_vc: {e}")
+        return {
+            "status": "success",
+            "message": f"❌ Lỗi /vc: {html.escape(str(e))}",
+            "message_format": "HTML",
+            "user_id": user_id,
+            "chat_id": job.chat_id,
+        }
+
 
 def handle_cks(job: Job) -> Dict[str, Any]:
     input_data = job.data.get("input")  # L\u1ea5y tham s\u1ed1 \u0111\u1ea7u ti\u00ean t\u1eeb context.args
