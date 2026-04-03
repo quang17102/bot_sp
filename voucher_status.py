@@ -36,10 +36,10 @@ VOUCHER_BATCH_SEPARATOR = "\n─────────────────
 # Khi chạy: `python voucher_status.py batch` (không cần -i) sẽ dùng list này.
 VOUCHER_BATCH_LIST_HARDCODED: List[Dict[str, Any]] = [
     {
-        "ten_ma": "Giảm 20k₫ | Đơn 0đ",
-        "promotionid": 1384635680329728,
-        "voucher_code": "CRMWBZ0426A",
-        "signature": "739bef100470de02b9ba0b0ac1643d6f437c8ddececb937ce2dfb168230f5e72",
+        "ten_ma": "Giảm 90k₫ | Đơn 0đ",
+        "promotionid": 1389694077014016,
+        "voucher_code": "TANGBANMOI",
+        "signature": "73b552b5f644508ab83f6d474f5b9d0e8477e2a569bef866dee86715f4dcd2c5",
     },
     {
         "ten_ma": "100.000đ | Đơn 0đ",
