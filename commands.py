@@ -39,7 +39,11 @@ from otp_token_storage import (
 )
 import login
 import login_qr
-from tg_supabase.telegram_users_db import save_user_on_start, get_telegram_user
+from tg_supabase.telegram_users_db import (
+    get_telegram_user,
+    save_user_on_start,
+    set_user_excel_link,
+)
 from tg_supabase.subscriptions import get_active_reg_subscriptions
 from tg_supabase.voucher_logs import (
     get_active_voucher_subscription,
@@ -1917,6 +1921,63 @@ async def delpx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def setsheet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Lưu / xem link sheet (cột excel trong bảng telegram_users).
+
+    Cú pháp:
+      - /setsheet
+            Xem link đang lưu (nếu có).
+      - /setsheet <link_sheet>
+            Lưu link vào Supabase theo telegram_user_id.
+    """
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("❌ Không lấy được thông tin user.")
+        return
+
+    user_id = user.id
+
+    if not context.args:
+        row = get_telegram_user(user_id)
+        link = (row or {}).get("excel") if row else None
+        if not link:
+            await update.message.reply_text(
+                "📭 Chưa có link sheet.\n"
+                "Cú pháp: <code>/setsheet https://docs.google.com/spreadsheets/...</code>",
+                parse_mode="HTML",
+            )
+            return
+        await update.message.reply_text(
+            "📎 Link sheet hiện tại:\n"
+            f"<code>{html.escape(str(link))}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    sheet_link = " ".join(context.args).strip()
+    if not sheet_link:
+        await update.message.reply_text(
+            "❌ Link không hợp lệ.\n"
+            "Cú pháp: <code>/setsheet https://...</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    if not set_user_excel_link(user_id, sheet_link):
+        await update.message.reply_text(
+            "❌ Không lưu được link",
+            parse_mode="HTML",
+        )
+        return
+
+    await update.message.reply_text(
+        "✅ Đã lưu link sheet.\n"
+        "Xem lại: <code>/setsheet</code>",
+        parse_mode="HTML",
+    )
+
+
 async def vc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Lưu batch voucher mall: ``user|pass|sdt|SPC_F=...`` → lấy SPC_ST qua proxy,
@@ -2459,6 +2520,7 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CommandHandler("kipx", kipx_command))
     application.add_handler(CommandHandler("vnpx", vnpx_command))
     application.add_handler(CommandHandler("delpx", delpx_command))
+    application.add_handler(CommandHandler("setsheet", setsheet_command))
     for token_cmd in OTP_TOKEN_PROVIDERS:
         application.add_handler(CommandHandler(token_cmd, otp_provider_token_command))
     application.add_handler(CommandHandler("deltoken", deltoken_command))
