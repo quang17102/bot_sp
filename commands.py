@@ -1894,7 +1894,7 @@ async def delpx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     Cú pháp:
       - /delpx
-            Xóa tất cả proxy keys (kiot, vnpx, vnpx_proxy, ...) của user.
+            Xóa hẳn mọi dòng proxy_keys (kiot, vnpx, vnpx_proxy, …) của user trên DB.
     """
     user = update.effective_user
     if not user:
@@ -1902,10 +1902,16 @@ async def delpx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = user.id
-    delete_user_proxies(user_id)
+    if not delete_user_proxies(user_id):
+        await update.message.reply_text(
+            "❌ Không xóa được proxy"
+            "Báo admin bạn nhé",
+            parse_mode="HTML",
+        )
+        return
 
     await update.message.reply_text(
-        "🗑️ Đã xóa toàn bộ proxy keys của bạn.\n"
+        "🗑️ Đã xóa hẳn toàn bộ proxy keys.\n"
         "Bạn có thể thiết lập lại bằng /kipx và /vnpx.",
         parse_mode="HTML",
     )
