@@ -44,6 +44,7 @@ from tg_supabase.telegram_users_db import (
     save_user_on_start,
     set_user_excel_link,
 )
+from tg_supabase.reg_acc_db import insert_reg_request
 from tg_supabase.subscriptions import get_active_reg_subscriptions
 from tg_supabase.voucher_logs import (
     get_active_voucher_subscription,
@@ -66,14 +67,14 @@ _changemail_manual_pending: dict[tuple[int, int], dict] = {}
 _CHANGEMAIL_MANUAL_OTP_TTL_SEC = 900.0
 
 OTP_TOKEN_PROVIDERS: dict[str, tuple[str, str]] = {
-    "vitoken": ("viotp", "ViOTP"),
-    "bosstoken": ("bossotp", "BossOTP"),
-    "bowertoken": ("smsbower", "SmsBower"),
-    "otistoken": ("otistx", "OtisTX"),
-    "irontoken": ("ironsim", "IronSIM"),
-    "funtoken": ("funotp", "FunOTP"),
-    "chaycodetoken": ("chaycode", "ChayCode"),
-    "365token": ("365otp", "365OTP"),
+    # "addviotp": ("viotp", "ViOTP"),
+    "addboss": ("boss", "BossOTP"),
+    "addbower": ("smsbower", "SmsBower"),
+    "addotisx": ("otistx", "OtisTX"),
+    # "irontoken": ("ironsim", "IronSIM"),
+    # "funtoken": ("funotp", "FunOTP"),
+    # "chaycodetoken": ("chaycode", "ChayCode"),
+    # "365token": ("365otp", "365OTP"),
 }
 
 
@@ -1403,7 +1404,7 @@ async def email_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                     body_text = email_detail.get('body_text', '')
                     body_html = email_detail.get('body_html', '')
                     verification_link = email_utils.parse_verification_link_from_body(body_text, body_html)
-                    
+                    print("verification_link: ", verification_link)
                     if verification_link:
                         await query.answer("Đang xử lý...", show_alert=False)
 
@@ -1978,6 +1979,60 @@ async def setsheet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Đăng ký reg acc: /reg <sl> → insert reg_acc (id_tele + sl).
+
+    Nếu đã có dòng reg_acc với cùng id_tele thì từ chối.
+    """
+    user = update.effective_user
+    if not update.message:
+        return
+    if not user:
+        await update.message.reply_text("❌ Không lấy được thông tin user.")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Cú pháp: <code>/reg 5</code> (số lượng acc muốn reg).",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        sl = int(str(context.args[0]).strip())
+    except ValueError:
+        await update.message.reply_text(
+            "❌ <code>sl</code> phải là số nguyên, ví dụ: <code>/reg 5</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    result = insert_reg_request(user.id, sl)
+    if result == "busy":
+        await update.message.reply_text(
+            "Bạn vẫn đang reg acc, thêm lệnh sau khi hoàn thành nhé!",
+        )
+        return
+    if result == "invalid":
+        await update.message.reply_text(
+            "❌ Số lượng phải là số nguyên dương, ví dụ: <code>/reg 5</code>.",
+            parse_mode="HTML",
+        )
+        return
+    if result == "error":
+        await update.message.reply_text(
+            "❌ Không ghi được yêu cầu (Supabase / RLS).",
+            parse_mode="HTML",
+        )
+        return
+
+    await update.message.reply_text(
+        f"✅ Đã tạo yêu cầu reg <code>{sl}</code> acc.",
+        parse_mode="HTML",
+    )
+
+
 async def vc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Lưu batch voucher mall: ``user|pass|sdt|SPC_F=...`` → lấy SPC_ST qua proxy,
@@ -2521,6 +2576,7 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CommandHandler("vnpx", vnpx_command))
     application.add_handler(CommandHandler("delpx", delpx_command))
     application.add_handler(CommandHandler("setsheet", setsheet_command))
+    application.add_handler(CommandHandler("reg", reg_command))
     for token_cmd in OTP_TOKEN_PROVIDERS:
         application.add_handler(CommandHandler(token_cmd, otp_provider_token_command))
     application.add_handler(CommandHandler("deltoken", deltoken_command))

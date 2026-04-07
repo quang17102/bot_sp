@@ -109,6 +109,25 @@ def parse_verification_link_from_body(body_text: str, body_html: str = "") -> Op
         match = re.search(pattern, body_html)
         if match:
             return match.group(1)
+
+        # Fallback: bắt các href xác minh dạng redirect/tracking (ví dụ SendGrid ls/click).
+        hrefs = re.findall(r'href=["\'](https?://[^"\']+)["\']', body_html, re.IGNORECASE)
+        if hrefs:
+            for url in hrefs:
+                url_lower = url.lower()
+                if any(
+                    key in url_lower
+                    for key in (
+                        "vn.shp.ee/dlink/",
+                        "ls/click",
+                        "upn=",
+                        "verify",
+                        "verification",
+                        "confirm",
+                        "shopee",
+                    )
+                ):
+                    return url
     
     # Tìm trong body_text
     if body_text:
@@ -116,6 +135,23 @@ def parse_verification_link_from_body(body_text: str, body_html: str = "") -> Op
         match = re.search(pattern, body_text)
         if match:
             return match.group(0)
+
+        # Fallback trong text thuần cho link tracking/verify.
+        for url in re.findall(r'https?://[^\s"\'<>]+', body_text):
+            url_lower = url.lower()
+            if any(
+                key in url_lower
+                for key in (
+                    "vn.shp.ee/dlink/",
+                    "ls/click",
+                    "upn=",
+                    "verify",
+                    "verification",
+                    "confirm",
+                    "shopee",
+                )
+            ):
+                return url
     
     return None
 
@@ -465,8 +501,8 @@ def format_email_detail(email: Dict[str, Any]) -> str:
             message += f"📍 <b>Vị trí:</b> {location}\n"
         
         # Link xác minh
-        if verification_link:
-            message += f"🔗 <b>Link xác minh:</b> <code>{verification_link}</code>\n"
+        # if verification_link:
+        #     message += f"🔗 <b>Link xác minh:</b> <code>{verification_link}</code>\n"
         
         return message
     
