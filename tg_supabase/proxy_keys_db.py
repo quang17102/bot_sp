@@ -55,23 +55,34 @@ def save_user_proxy_key(
         return
     try:
         sb = _get_client()
-        (
+        existing = (
             sb.table("proxy_keys")
-            .update({"is_active": False})
+            .select("id")
             .eq("telegram_user_id", user_id)
             .eq("proxy_type", proxy_type)
-            .eq("is_active", True)
+            .limit(1)
             .execute()
         )
-        row: Dict = {
-            "telegram_user_id": user_id,
-            "proxy_type": proxy_type,
-            "key_value": key,
-            "is_active": True,
-        }
+
+        payload: Dict = {"key_value": key, "is_active": True}
         if label is not None:
-            row["label"] = label
-        sb.table("proxy_keys").insert(row).execute()
+            payload["label"] = label
+
+        if existing.data:
+            (
+                sb.table("proxy_keys")
+                .update(payload)
+                .eq("telegram_user_id", user_id)
+                .eq("proxy_type", proxy_type)
+                .execute()
+            )
+        else:
+            row: Dict = {
+                "telegram_user_id": user_id,
+                "proxy_type": proxy_type,
+                **payload,
+            }
+            sb.table("proxy_keys").insert(row).execute()
     except Exception:
         logger.exception(
             "Không lưu được proxy_keys user_id=%s proxy_type=%s",
@@ -81,6 +92,7 @@ def save_user_proxy_key(
 
 
 def get_user_proxy_key(user_id: int, proxy_type: str) -> Optional[str]:
+    print(f"get_user_proxy_key: user_id={user_id}, proxy_type={proxy_type}")
     proxy_type = proxy_type.strip()
     if not proxy_type:
         return None
@@ -97,6 +109,7 @@ def get_user_proxy_key(user_id: int, proxy_type: str) -> Optional[str]:
             .execute()
         )
         rows = resp.data or []
+        print(f"rows:{rows}")
         if not rows:
             return None
         v = rows[0].get("key_value")
