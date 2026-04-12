@@ -40,6 +40,7 @@ from otp_token_storage import (
 import login
 import login_qr
 from tg_supabase.telegram_users_db import (
+    decrease_user_tien,
     get_telegram_user,
     save_user_on_start,
     set_user_excel_link,
@@ -1983,6 +1984,9 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Đăng ký reg acc: /reg <sl> → insert reg_acc (id_tele + sl).
 
+    Có gói reg active: không trừ tien.
+    Không có gói reg: cần tien > sl * 1000 (mỗi lần reg 1000đ), sau khi tạo yêu cầu trừ sl * 1000.
+
     Nếu đã có dòng reg_acc với cùng id_tele thì từ chối.
     """
     user = update.effective_user
@@ -2008,6 +2012,28 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if sl <= 0:
+        await update.message.reply_text(
+            "❌ Số lượng phải là số nguyên dương, ví dụ: <code>/reg 5</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    REG_PRICE = 1000
+    has_reg = bool(get_active_reg_subscriptions(user.id))
+    if not has_reg:
+        db_user = get_telegram_user(user.id)
+        tien = int(db_user.get("tien") or 0) if db_user else 0
+        cost = sl * REG_PRICE
+        if not (tien > cost):
+            await update.message.reply_text(
+                "❌ Bạn chưa có gói reg: cần số dư <b>lớn hơn</b> "
+                f"<code>{cost}</code>đ (mỗi lần reg {REG_PRICE}đ × <code>{sl}</code> lần).\n"
+                "Hoặc mua gói reg để không trừ tiền theo lần.",
+                parse_mode="HTML",
+            )
+            return
+
     result = insert_reg_request(user.id, sl)
     if result == "busy":
         await update.message.reply_text(
@@ -2026,6 +2052,14 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
         )
         return
+
+    if not has_reg:
+        if not decrease_user_tien(user.id, sl * REG_PRICE):
+            await update.message.reply_text(
+                "❌ Đã tạo yêu cầu nhưng không trừ được số dư. Báo admin kiểm tra.",
+                parse_mode="HTML",
+            )
+            return
 
     await update.message.reply_text(
         f"✅ Đã tạo yêu cầu reg <code>{sl}</code> acc.",

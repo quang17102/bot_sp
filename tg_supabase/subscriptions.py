@@ -65,7 +65,7 @@ def ensure_reg_package(package_code: RegCode) -> None:
                 "duration_days": duration_days,
                 "max_reg_accounts": 100000,
             },
-            on_conflict="package_code",
+            on_conflict="code",
         ).execute()
     except Exception:
         logger.exception("Không upsert được packages cho package_code=%s", package_code)
