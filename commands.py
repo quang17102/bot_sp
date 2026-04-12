@@ -1986,6 +1986,7 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     Có gói reg active: không trừ tien.
     Không có gói reg: cần tien > sl * 1000 (mỗi lần reg 1000đ), sau khi tạo yêu cầu trừ sl * 1000.
+    Bắt buộc đã lưu link sheet (cột excel trong telegram_users) qua /setsheet.
 
     Nếu đã có dòng reg_acc với cùng id_tele thì từ chối.
     """
@@ -2019,10 +2020,19 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    db_user = get_telegram_user(user.id)
+    sheet_raw = (db_user or {}).get("excel")
+    sheet_link = str(sheet_raw).strip() if sheet_raw else ""
+    if not sheet_link:
+        await update.message.reply_text(
+            "❌ Bạn hãy đọc hướng dẫn để cấu hinh link sheet nhé.\n",
+            parse_mode="HTML",
+        )
+        return
+
     REG_PRICE = 1000
     has_reg = bool(get_active_reg_subscriptions(user.id))
     if not has_reg:
-        db_user = get_telegram_user(user.id)
         tien = int(db_user.get("tien") or 0) if db_user else 0
         cost = sl * REG_PRICE
         if not (tien > cost):
