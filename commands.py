@@ -6,8 +6,10 @@ T\u1EA5t c\u1EA3 c\u00E1c command handlers \u0111\u01B0\u1EE3c \u0111\u1ECBnh ng
 import base64
 import html
 import io
+import random
 import re
 import time
+from pathlib import Path
 from shipping import spx, ghn
 import checkmvd
 import asyncio
@@ -37,6 +39,7 @@ from otp_token_storage import (
     get_user_otp_token,
     delete_all_user_otp_tokens,
 )
+from add_diachi import AddAddressInput, add_address_direct, normalize_phone as normalize_address_phone
 import login
 import login_qr
 from tg_supabase.telegram_users_db import (
@@ -77,6 +80,43 @@ OTP_TOKEN_PROVIDERS: dict[str, tuple[str, str]] = {
     # "chaycodetoken": ("chaycode", "ChayCode"),
     # "365token": ("365otp", "365OTP"),
 }
+
+_RANDOM_MIDDLE_NAMES = ["Van", "Thi", "Minh", "Ngoc", "Duc", "Quoc", "Thanh", "Gia"]
+_NAMES_LAST_PATH = Path(__file__).with_name("names_last.txt")
+_NAMES_FIRST_PATH = Path(__file__).with_name("names_first.txt")
+
+
+def _load_name_list(path: Path) -> list[str]:
+    try:
+        if not path.exists():
+            return []
+        items = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
+        cleaned = [x for x in items if x and not x.startswith("#")]
+        return cleaned
+    except Exception:
+        return []
+
+
+def _random_vn_name() -> str:
+    last_names = _load_name_list(_NAMES_LAST_PATH)
+    first_names = _load_name_list(_NAMES_FIRST_PATH)
+    if not last_names or not first_names:
+        raise RuntimeError("Thiếu dữ liệu họ/tên trong names_last.txt hoặc names_first.txt")
+    return f"{random.choice(last_names)} {random.choice(_RANDOM_MIDDLE_NAMES)} {random.choice(first_names)}"
+
+
+def _normalize_spc_st_input(raw: str) -> str:
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if s.upper().startswith("SPC_ST="):
+        return f"SPC_ST={s.split('=', 1)[1].strip()}"
+    return f"SPC_ST={s}"
+
+
+def _looks_like_phone(v: str) -> bool:
+    digits = re.sub(r"\D", "", v or "")
+    return len(digits) >= 9
 
 
 def _changemail_last_arg_is_user_email(last: str) -> bool:
@@ -2077,6 +2117,155 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def adddiachi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /adddiachi <auth> | <dia_chi_day_du> | [sdt] | [ten]
+
+    auth:
+      - chứa SPC_F => hiểu là id|pass|sdt|SPC_F=... (cần convert sang SPC_ST)
+      - còn lại      => hiểu là cookie SPC_ST hoặc raw SPC_ST value
+    """
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not user:
+        return
+
+    raw_all = " ".join(context.args or []).strip()
+    if not raw_all:
+        await msg.reply_text(
+            "❌ Thiếu tham số.\n"
+            "Cú pháp khuyến nghị:\n"
+            "<code>/adddiachi auth | dia_chi_day_du | sdt_tuy_chon | ten_tuy_chon</code>\n"
+            "Ví dụ:\n"
+            "<code>/adddiachi SPC_ST=... | 20 Tran Dinh Tri, Quảng Ngãi | 0376585452 | Nguyen Van A</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    parts = [p.strip() for p in raw_all.split("|")]
+    if any("SPC_F" in p.upper() for p in parts):
+        # Dạng auth đầy đủ: id|pass|sdt|SPC_F=...
+        # Cú pháp đầy đủ khi có SPC_F:
+        #   /adddiachi id|pass|sdt|SPC_F=... | dia_chi_day_du | sdt_tuy_chon | ten_tuy_chon
+        if len(parts) < 5:
+            await msg.reply_text(
+                "❌ Thiếu tham số cho dạng <code>id|pass|sdt|SPC_F</code>.\n"
+                "Cần tối thiểu: <code>id|pass|sdt|SPC_F=... | dia_chi_day_du</code>",
+                parse_mode="HTML",
+            )
+            return
+        raw_auth = "|".join(parts[:4]).strip()
+        address = parts[4]
+        phone_input = parts[5] if len(parts) >= 6 else ""
+        name_input = "|".join(parts[6:]).strip() if len(parts) >= 7 else ""
+    else:
+        # Dạng auth là SPC_ST/raw SPC_ST value
+        if len(parts) < 2:
+            await msg.reply_text(
+                "❌ Thiếu địa chỉ hoặc sai định dạng.\n"
+                "Dùng dấu <code>|</code> để tách: <code>auth | dia_chi | sdt | ten</code>",
+                parse_mode="HTML",
+            )
+            return
+        raw_auth = parts[0]
+        address = parts[1]
+        phone_input = parts[2] if len(parts) >= 3 else ""
+        name_input = "|".join(parts[3:]).strip() if len(parts) >= 4 else ""
+
+    if not address:
+        await msg.reply_text("❌ Địa chỉ không được để trống.", parse_mode="HTML")
+        return
+
+    proxies, _src = get_user_best_proxy(user.id)
+    if not proxies:
+        await msg.reply_text(
+            "❌ Cần cấu hình proxy (<code>/kipx</code> hoặc <code>/vnpx</code>) trước.",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        print(raw_auth) 
+        if "SPC_F" in raw_auth.upper():
+            spc_st_val = await asyncio.to_thread(login.extract_spc_st, raw_auth, proxies)
+            spc_st_cookie = _normalize_spc_st_input(spc_st_val)
+        else:
+            spc_st_cookie = _normalize_spc_st_input(raw_auth)
+    except Exception as e:
+        await msg.reply_text(
+            "❌ Không chuyển được sang <code>SPC_ST</code>.\n"
+            f"<code>{html.escape(str(e))}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    if not spc_st_cookie or spc_st_cookie.upper() == "SPC_ST=":
+        await msg.reply_text("❌ Cookie <code>SPC_ST</code> không hợp lệ.", parse_mode="HTML")
+        return
+
+    phone = normalize_address_phone(phone_input)
+    if not phone:
+        info = await asyncio.to_thread(login.get_user_info_by_spc_st, spc_st_cookie, None, None, None, proxies)
+        data = info.get("data") if isinstance(info, dict) else {}
+        chat_data = (data or {}).get("data") if isinstance(data, dict) else {}
+        fallback_candidates = [
+            (chat_data or {}).get("phone"),
+            (data or {}).get("phone"),
+            ((info or {}).get("seller_user_info") or {}).get("phone"),
+            ((info or {}).get("seller_user_info") or {}).get("data", {}).get("phone"),
+            ((info or {}).get("seller_user_info") or {}).get("data", {}).get("phone_number"),
+        ]
+        for cand in fallback_candidates:
+            phone = normalize_address_phone(str(cand or ""))
+            if phone:
+                break
+    if not phone:
+        await msg.reply_text(
+            "❌ Không có số điện thoại hợp lệ. Hãy truyền sdt hoặc kiểm tra cookie.",
+            parse_mode="HTML",
+        )
+        return
+    print(phone)
+    name = (name_input or "").strip() or _random_vn_name()
+    payload = AddAddressInput(
+        spc_st=spc_st_cookie,
+        address=address,
+        phone=phone,
+        note="",
+        name=name,
+        proxies=proxies,
+    )
+
+    progress = await msg.reply_text("⏳ Đang thêm địa chỉ...")
+    try:
+        result = await asyncio.to_thread(add_address_direct, payload)
+    except Exception as e:
+        await msg.reply_text(
+            "❌ Thêm địa chỉ thất bại.\n"
+            f"<code>{html.escape(str(e))}</code>",
+            parse_mode="HTML",
+        )
+        return
+    finally:
+        try:
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id,
+                message_id=progress.message_id,
+            )
+        except Exception:
+            pass
+
+    parsed = result.get("parsed") if isinstance(result, dict) else {}
+    await msg.reply_text(
+        "✅ Đã thêm địa chỉ thành công.\n"
+        f"🆔 Address ID: <code>{html.escape(str(result.get('addressId') or ''))}</code>\n"
+        f"👤 Tên: <code>{html.escape(str((parsed or {}).get('name') or name))}</code>\n"
+        f"📞 SĐT: <code>{html.escape(str((parsed or {}).get('phone') or phone))}</code>\n"
+        f"📍 Địa chỉ: <code>{html.escape(str((parsed or {}).get('detailedAddress') or address))}</code>",
+        parse_mode="HTML",
+    )
+
+
 async def vc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Lưu batch voucher mall: ``user|pass|sdt|SPC_F=...`` → lấy SPC_ST qua proxy,
@@ -2614,6 +2803,7 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CommandHandler("checkmail", checkmail_wrapper))
     application.add_handler(CommandHandler("mailfree", mailfree_wrapper))
     application.add_handler(CommandHandler("addmail", addmail_wrapper))
+    application.add_handler(CommandHandler("adddiachi", adddiachi_command))
     application.add_handler(CommandHandler("newmail", newmail_wrapper))
     application.add_handler(CommandHandler("queue", queue_wrapper))
     application.add_handler(CommandHandler("kipx", kipx_command))
