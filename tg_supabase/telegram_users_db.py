@@ -127,3 +127,27 @@ def decrease_user_tien(telegram_user_id: int, amount: int) -> bool:
             amount,
         )
         return False
+
+
+def increase_user_tien(telegram_user_id: int, amount: int) -> bool:
+    """Cộng cột tien (đồng), dùng khi nạp tiền custom thành công."""
+    if amount <= 0:
+        return True
+    try:
+        sb = _get_client()
+        row = get_telegram_user(telegram_user_id)
+        if not row:
+            return False
+        cur = int(row.get("tien") or 0)
+        new_val = cur + amount
+        sb.table("telegram_users").update({"tien": new_val}).eq(
+            "telegram_user_id", telegram_user_id
+        ).execute()
+        return True
+    except Exception:
+        logger.exception(
+            "Không cộng được tien user_id=%s amount=%s",
+            telegram_user_id,
+            amount,
+        )
+        return False

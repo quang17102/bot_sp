@@ -18,6 +18,7 @@ from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import (
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -45,15 +46,19 @@ import login_qr
 from tg_supabase.telegram_users_db import (
     decrease_user_tien,
     get_telegram_user,
+    increase_user_tien,
     save_user_on_start,
     set_user_excel_link,
 )
 from tg_supabase.reg_acc_db import insert_reg_request
-from tg_supabase.subscriptions import get_active_reg_subscriptions
+from tg_supabase.deposit_orders import get_package_price_k
+from tg_supabase.subscriptions import create_reg_subscription, get_active_reg_subscriptions
 from tg_supabase.voucher_logs import (
     get_active_voucher_subscription,
     get_free_voucher_used_today,
 )
+from vietqr_quicklink import build_vietqr_quicklink
+from sieuthicode_token_bidv_get import get_token_bidv
 
 if TYPE_CHECKING:
     from telegram.ext import Application
@@ -69,6 +74,20 @@ _email_creds: dict[str, dict[str, str]] = {}
 # Key: (chat_id, user_id) — value: spc_st, change_token, seed, email, proxies, expires_at (monotonic)
 _changemail_manual_pending: dict[tuple[int, int], dict] = {}
 _CHANGEMAIL_MANUAL_OTP_TTL_SEC = 900.0
+# Chờ nạp tiền: khóa lệnh khác cho tới khi hủy/thành công/hết hạn.
+# Key: (chat_id, user_id) — value: payment_code, amount, package_code, expires_at (monotonic)
+_naptien_pending: dict[tuple[int, int], dict] = {}
+_NAPTIEN_PENDING_TTL_SEC = 900.0
+_naptien_watch_tasks: dict[tuple[int, int], asyncio.Task] = {}
+_SUBSCRIPTION_CODES = {"reg1", "reg7", "reg30", "sv7", "sv30"}
+_NAPTIEN_TOKEN = "b617cbd01175f731323645384c9126fa"
+_PACKAGE_LABELS = {
+    "reg1": "Gói REG 1 ngày",
+    "reg7": "Gói REG 7 ngày",
+    "reg30": "Gói REG 30 ngày",
+    "sv7": "Gói SV 7 ngày",
+    "sv30": "Gói SV 30 ngày",
+}
 
 OTP_TOKEN_PROVIDERS: dict[str, tuple[str, str]] = {
     # "addviotp": ("viotp", "ViOTP"),
@@ -243,13 +262,326 @@ NAPTIEN_HELP_TEXT = (
     "⏳ <i>Hệ thống tự động cộng sau 1–2 phút.</i>"
 )
 
+NAPTIEN_BANK_ID = "Vietcombank"
+NAPTIEN_ACCOUNT_NO = "1066550795"
+NAPTIEN_ACCOUNT_NAME = "Huynh Quang Duy"
+NAPTIEN_TEMPLATE = "compact2"
+
+
+def _format_vnd(amount: int) -> str:
+    return f"{int(amount):,}".replace(",", ".") + "đ"
+
+
+def _naptien_pending_key(update: Update) -> Optional[tuple[int, int]]:
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user:
+        return None
+    return (chat.id, user.id)
+
+
+def _get_naptien_pending(update: Update) -> Optional[dict]:
+    key = _naptien_pending_key(update)
+    if not key:
+        return None
+    pending = _naptien_pending.get(key)
+    if not pending:
+        return None
+    if time.monotonic() > float(pending.get("expires_at", 0)):
+        _naptien_pending.pop(key, None)
+        return None
+    return pending
+
+
+def clear_naptien_pending_by_payment_code(payment_code: str) -> bool:
+    """Xóa lock nạp trong RAM theo payment_code (dùng từ job đối soát)."""
+    code = (payment_code or "").strip().upper()
+    if not code:
+        return False
+    removed = False
+    for key, pending in list(_naptien_pending.items()):
+        pcode = str(pending.get("payment_code") or "").strip().upper()
+        if pcode == code:
+            _naptien_pending.pop(key, None)
+            removed = True
+    return removed
+
+
+def _parse_vnd_amount(v: object) -> int:
+    digits = re.sub(r"[^\d]", "", str(v or ""))
+    return int(digits) if digits else 0
+
+
+def _gen_payment_code(length: int = 13) -> str:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    return "".join(random.choice(alphabet) for _ in range(length))
+
+
+def _tx_matches_payment(tx: dict, payment_code: str, amount: int) -> bool:
+    if _parse_vnd_amount(tx.get("Amount")) != int(amount):
+        return False
+    code = (payment_code or "").strip().upper()
+    desc = str(tx.get("Description") or "").strip().upper()
+    remark = str(tx.get("Remark") or "").strip().upper()
+    return bool(code) and (code in desc or code in remark)
+
+
+async def _watch_naptien_payment(
+    *,
+    chat_id: int,
+    user_id: int,
+    payment_code: str,
+    amount: int,
+    package_code: str,
+    bot,
+) -> None:
+    """Watcher theo từng phiên /naptien: chỉ quét khi có đơn nạp mới."""
+    key = (chat_id, user_id)
+    try:
+        while True:
+            pending = _naptien_pending.get(key)
+            if not pending:
+                return
+            if str(pending.get("payment_code") or "").strip().upper() != payment_code.strip().upper():
+                return
+
+            if time.monotonic() > float(pending.get("expires_at", 0)):
+                _naptien_pending.pop(key, None)
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="⌛ Phiên nạp tiền đã hết hạn. Vui lòng tạo lệnh /naptien mới nếu cần.",
+                )
+                return
+
+            try:
+                resp = await asyncio.to_thread(get_token_bidv, _NAPTIEN_TOKEN, timeout=30.0)
+                payload = resp.json() if resp.ok else {}
+                print(f"payload:{payload}")
+                txs = payload.get("transactions") or []
+                print(f"txs:{txs}")
+            except Exception:
+                txs = []
+
+            matched = None
+            for tx in txs:
+                if _tx_matches_payment(tx, payment_code, amount):
+                    print(f"matched:{payment_code}")
+                    matched = tx
+                    break
+
+            if matched is None:
+                await asyncio.sleep(10)
+                continue
+
+            applied = False
+            if package_code in _SUBSCRIPTION_CODES:
+                applied = await asyncio.to_thread(create_reg_subscription, user_id, package_code)
+            elif package_code.startswith("custom_"):
+                applied = await asyncio.to_thread(increase_user_tien, user_id, amount)
+
+            if not applied:
+                await asyncio.sleep(10)
+                continue
+
+            _naptien_pending.pop(key, None)
+            if package_code.startswith("custom_"):
+                success_detail = f"• Đã cộng số dư: <b>{_escape(_format_vnd(amount))}</b>"
+            else:
+                pkg_label = _PACKAGE_LABELS.get(package_code, package_code.upper())
+                success_detail = (
+                    f"• Đã kích hoạt: <b>{_escape(pkg_label)}</b>\n"
+                    f"• Số tiền: <b>{_escape(_format_vnd(amount))}</b>"
+                )
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "✅ Nạp tiền thành công!\n"
+                    f"• Nội dung CK: <code>{_escape(payment_code)}</code>\n"
+                    f"{success_detail}"
+                ),
+                parse_mode="HTML",
+            )
+            return
+    except asyncio.CancelledError:
+        return
+    finally:
+        _naptien_watch_tasks.pop(key, None)
+
+
+async def naptien_pending_command_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Chặn command khi user đang ở phiên nạp tiền pending."""
+    msg = update.effective_message
+    if not msg or not msg.text:
+        return
+    pending = _get_naptien_pending(update)
+    if not pending:
+        return
+    raw_cmd = (msg.text.split()[0] if msg.text else "").strip().lower()
+    cmd = raw_cmd.lstrip("/").split("@", 1)[0]
+    if cmd in {"naptien", "huynap"}:
+        return
+    await msg.reply_text(
+        "⏳ Bạn đang có phiên nạp tiền chưa hoàn tất.\n"
+        "Vui lòng chuyển khoản theo QR hoặc dùng <code>/huynap</code> để hủy trước khi dùng lệnh khác.",
+        parse_mode="HTML",
+    )
+    raise ApplicationHandlerStop
+
 
 async def naptien_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lệnh /naptien — in bảng giá nạp tiền."""
+    """Lệnh /naptien [goi|so_k] — tạo đơn nạp + sinh QR VietQR."""
     msg = update.effective_message
     if not msg:
         return
-    await msg.reply_text(NAPTIEN_HELP_TEXT, parse_mode="HTML")
+    user = update.effective_user
+    if not user:
+        await msg.reply_text("❌ Không lấy được thông tin user.")
+        return
+    pending = _get_naptien_pending(update)
+    if pending:
+        await msg.reply_text(
+            "⏳ Bạn đang có phiên nạp tiền chưa hoàn tất.\n"
+            "Dùng <code>/huynap</code> hoặc bấm nút <b>Hủy nạp tiền</b> để hủy phiên hiện tại.",
+            parse_mode="HTML",
+        )
+        return
+
+    args = list(context.args or [])
+    if not args:
+        await msg.reply_text(NAPTIEN_HELP_TEXT, parse_mode="HTML")
+        return
+
+    raw = (args[0] or "").strip().lower()
+    if not raw:
+        await msg.reply_text(NAPTIEN_HELP_TEXT, parse_mode="HTML")
+        return
+
+    package_code = raw
+    amount: Optional[int] = None
+
+    pkg_price_k = await asyncio.to_thread(get_package_price_k, raw)
+    if pkg_price_k is not None:
+        amount = int(pkg_price_k) * 1000
+    elif raw.isdigit():
+        # /naptien 10 => 10.000đ
+        amount = int(raw) * 1000
+        package_code = f"custom_{raw}k"
+    else:
+        await msg.reply_text(
+            "❌ Nội dung không hợp lệ.\n"
+            "Dùng <code>/naptien reg1</code> hoặc <code>/naptien 10</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    if not amount or amount <= 0:
+        await msg.reply_text("❌ Số tiền nạp không hợp lệ.")
+        return
+
+    payment_code = _gen_payment_code()
+    expires_at_dt = datetime.now(timezone(timedelta(hours=7))) + timedelta(
+        seconds=_NAPTIEN_PENDING_TTL_SEC
+    )
+    expires_at_text = expires_at_dt.strftime("%d/%m/%Y %H:%M")
+    key = _naptien_pending_key(update)
+    if key:
+        _naptien_pending[key] = {
+            "payment_code": payment_code,
+            "amount": int(amount),
+            "package_code": package_code,
+            "expires_at": time.monotonic() + _NAPTIEN_PENDING_TTL_SEC,
+        }
+        old_task = _naptien_watch_tasks.pop(key, None)
+        if old_task:
+            old_task.cancel()
+        _naptien_watch_tasks[key] = asyncio.create_task(
+            _watch_naptien_payment(
+                chat_id=key[0],
+                user_id=key[1],
+                payment_code=payment_code,
+                amount=int(amount),
+                package_code=package_code,
+                bot=context.bot,
+            )
+        )
+
+    qr_url = build_vietqr_quicklink(
+        NAPTIEN_BANK_ID,
+        NAPTIEN_ACCOUNT_NO,
+        NAPTIEN_TEMPLATE,
+        amount=amount,
+        add_info=payment_code,
+        account_name=NAPTIEN_ACCOUNT_NAME,
+        extension="png",
+    )
+
+    caption = (
+        "💳 <b>Tạo lệnh nạp thành công</b>\n\n"
+        f"• Số tiền: <b>{_escape(_format_vnd(amount))}</b>\n"
+        f"• Nội dung CK: {_copyable(payment_code)}\n"
+        f"• Hết hạn: <b>{_escape(expires_at_text or '15 phút')}</b>\n\n"
+        "• Trạng thái: <b>Đang chờ nạp</b>\n\n"
+        "⚠️ Chuyển khoản đúng số tiền và đúng nội dung để hệ thống tự cộng."
+    )
+    cancel_markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌ Hủy nạp tiền", callback_data="naptien_cancel")]]
+    )
+    try:
+        await msg.reply_photo(
+            photo=qr_url,
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=cancel_markup,
+        )
+    except Exception:
+        # Fallback nếu Telegram không fetch được ảnh từ URL.
+        await msg.reply_text(caption, parse_mode="HTML", reply_markup=cancel_markup)
+
+
+async def huynap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Hủy phiên nạp tiền đang pending."""
+    msg = update.effective_message
+    if not msg:
+        return
+    key = _naptien_pending_key(update)
+    if not key:
+        return
+    pending = _naptien_pending.get(key)
+    if not pending:
+        await msg.reply_text(
+            "ℹ️ Hiện không có phiên nạp tiền nào để hủy.",
+            parse_mode="HTML",
+        )
+        return
+    _naptien_pending.pop(key, None)
+    watch_task = _naptien_watch_tasks.pop(key, None)
+    if watch_task:
+        watch_task.cancel()
+    await msg.reply_text(
+        "✅ Đã hủy phiên nạp tiền.\nBạn có thể dùng lại các lệnh khác bình thường.",
+        parse_mode="HTML",
+    )
+
+
+async def huynap_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Hủy phiên nạp tiền bằng nút inline."""
+    query = update.callback_query
+    if not query or not query.message or not query.from_user:
+        return
+    key = (query.message.chat_id, query.from_user.id)
+    pending = _naptien_pending.get(key)
+    if not pending:
+        await query.answer("Không có phiên nạp để hủy.", show_alert=False)
+        return
+    _naptien_pending.pop(key, None)
+    watch_task = _naptien_watch_tasks.pop(key, None)
+    if watch_task:
+        watch_task.cancel()
+    await query.answer("Đã hủy nạp tiền.", show_alert=False)
+    await query.message.reply_text(
+        "✅ Đã hủy phiên nạp tiền.\nBạn có thể dùng lại các lệnh khác bình thường.",
+        parse_mode="HTML",
+    )
 
 
 async def changemail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2763,6 +3095,12 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     async def naptien_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await naptien_command(update, context)
 
+    async def huynap_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await huynap_command(update, context)
+
+    async def huynap_callback_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await huynap_callback_handler(update, context)
+
     async def info_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await info_command(update, context)
 
@@ -2790,12 +3128,17 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
         & filters.Regex(re.compile(r"^G[A-Za-z0-9]{7}$"))
     )
 
+    # Chặn các command khác khi user đang pending nạp tiền (trừ /naptien, /huynap).
+    application.add_handler(MessageHandler(filters.COMMAND, naptien_pending_command_guard), group=-1)
+
     application.add_handler(CommandHandler("start", start_wrapper))
     application.add_handler(CommandHandler("naptien", naptien_wrapper))
+    application.add_handler(CommandHandler("huynap", huynap_wrapper))
     application.add_handler(CommandHandler("info", info_wrapper))
     application.add_handler(CommandHandler("changemail", changemail_wrapper))
     application.add_handler(CommandHandler("huyotp", huyotp_wrapper))
     application.add_handler(CallbackQueryHandler(start_callback_wrapper, pattern=r"^start_"))
+    application.add_handler(CallbackQueryHandler(huynap_callback_wrapper, pattern=r"^naptien_cancel$"))
     application.add_handler(CallbackQueryHandler(huyotp_callback_wrapper, pattern=r"^changemail_huyotp$"))
     application.add_handler(CommandHandler("cvc", cvc_wrapper))
     application.add_handler(CommandHandler("cks", cks_wrapper))

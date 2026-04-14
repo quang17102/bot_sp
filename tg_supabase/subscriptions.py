@@ -40,12 +40,12 @@ def _get_client() -> Client:
     return _client
 
 
-RegCode = Literal["reg1", "reg7", "reg30"]
+SubscriptionCode = Literal["reg1", "reg7", "reg30", "sv7", "sv30"]
 
 
-def ensure_reg_package(package_code: RegCode) -> None:
+def ensure_reg_package(package_code: Literal["reg1", "reg7", "reg30"]) -> None:
     """Đảm bảo bản ghi gói reg1/reg7/reg30 tồn tại trong bảng packages."""
-    mapping: dict[RegCode, tuple[str, int]] = {
+    mapping: dict[Literal["reg1", "reg7", "reg30"], tuple[str, int]] = {
         "reg1": ("Gói REG 1 ngày", 1),
         "reg7": ("Gói REG 7 ngày", 7),
         "reg30": ("Gói REG 30 ngày", 30),
@@ -71,11 +71,15 @@ def ensure_reg_package(package_code: RegCode) -> None:
         logger.exception("Không upsert được packages cho package_code=%s", package_code)
 
 
-def create_reg_subscription(telegram_user_id: int, package_code: RegCode) -> None:
-    """Tạo gói reg unlimited cho user với mã reg1/reg7/reg30.
+def create_reg_subscription(telegram_user_id: int, package_code: SubscriptionCode) -> bool:
+    """Tạo/cộng dồn subscription cho user theo package_code.
 
+    - Hỗ trợ: reg1/reg7/reg30/sv7/sv30 (nếu package tồn tại trong bảng packages).
     - Nếu đã có gói active cùng loại, cộng dồn thêm ngày (extend expires_at).
     - Nếu chưa có, tạo mới với started_at=now, expires_at=now+duration_days.
+
+    Returns:
+        True nếu ghi DB thành công, False nếu có lỗi.
     """
     sb = _get_client()
     now = datetime.now(TZ_VN)
@@ -132,12 +136,14 @@ def create_reg_subscription(telegram_user_id: int, package_code: RegCode) -> Non
                     "source": "manual",
                 }
             ).execute()
+        return True
     except Exception:
         logger.exception(
             "Không tạo/cập nhật reg subscription cho user=%s, package_code=%s",
             telegram_user_id,
             package_code,
         )
+        return False
 
 
 def get_active_reg_subscriptions(telegram_user_id: int) -> list[dict]:
