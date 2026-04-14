@@ -52,6 +52,7 @@ from tg_supabase.telegram_users_db import (
 )
 from tg_supabase.reg_acc_db import insert_reg_request
 from tg_supabase.deposit_orders import get_package_price_k
+from tg_supabase.deposit_history import log_deposit_history
 from tg_supabase.subscriptions import create_reg_subscription, get_active_reg_subscriptions
 from tg_supabase.voucher_logs import (
     get_active_voucher_subscription,
@@ -347,6 +348,16 @@ async def _watch_naptien_payment(
 
             if time.monotonic() > float(pending.get("expires_at", 0)):
                 _naptien_pending.pop(key, None)
+                await asyncio.to_thread(
+                    log_deposit_history,
+                    telegram_user_id=user_id,
+                    chat_id=chat_id,
+                    package_code=package_code,
+                    amount=amount,
+                    payment_code=payment_code,
+                    status="expired",
+                    detail="session_expired",
+                )
                 await bot.send_message(
                     chat_id=chat_id,
                     text="⌛ Phiên nạp tiền đã hết hạn. Vui lòng tạo lệnh /naptien mới nếu cần.",
@@ -356,16 +367,13 @@ async def _watch_naptien_payment(
             try:
                 resp = await asyncio.to_thread(get_token_bidv, _NAPTIEN_TOKEN, timeout=30.0)
                 payload = resp.json() if resp.ok else {}
-                print(f"payload:{payload}")
                 txs = payload.get("transactions") or []
-                print(f"txs:{txs}")
             except Exception:
                 txs = []
 
             matched = None
             for tx in txs:
                 if _tx_matches_payment(tx, payment_code, amount):
-                    print(f"matched:{payment_code}")
                     matched = tx
                     break
 
@@ -384,6 +392,19 @@ async def _watch_naptien_payment(
                 continue
 
             _naptien_pending.pop(key, None)
+            tx_ref = str(matched.get("Reference") or matched.get("SeqNo") or "").strip()
+            await asyncio.to_thread(
+                log_deposit_history,
+                telegram_user_id=user_id,
+                chat_id=chat_id,
+                package_code=package_code,
+                amount=amount,
+                payment_code=payment_code,
+                status="success",
+                detail="payment_matched_and_applied",
+                transaction_ref=tx_ref,
+                transaction_raw=matched,
+            )
             if package_code.startswith("custom_"):
                 success_detail = f"• Đã cộng số dư: <b>{_escape(_format_vnd(amount))}</b>"
             else:
@@ -491,6 +512,16 @@ async def naptien_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "package_code": package_code,
             "expires_at": time.monotonic() + _NAPTIEN_PENDING_TTL_SEC,
         }
+        await asyncio.to_thread(
+            log_deposit_history,
+            telegram_user_id=user.id,
+            chat_id=key[0],
+            package_code=package_code,
+            amount=int(amount),
+            payment_code=payment_code,
+            status="created",
+            detail="user_created_naptien_order",
+        )
         old_task = _naptien_watch_tasks.pop(key, None)
         if old_task:
             old_task.cancel()
@@ -541,7 +572,8 @@ async def naptien_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def huynap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Hủy phiên nạp tiền đang pending."""
     msg = update.effective_message
-    if not msg:
+    user = update.effective_user
+    if not msg or not user:
         return
     key = _naptien_pending_key(update)
     if not key:
@@ -557,6 +589,16 @@ async def huynap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     watch_task = _naptien_watch_tasks.pop(key, None)
     if watch_task:
         watch_task.cancel()
+    await asyncio.to_thread(
+        log_deposit_history,
+        telegram_user_id=user.id,
+        chat_id=key[0],
+        package_code=str(pending.get("package_code") or ""),
+        amount=int(pending.get("amount") or 0),
+        payment_code=str(pending.get("payment_code") or ""),
+        status="cancelled",
+        detail="/huynap",
+    )
     await msg.reply_text(
         "✅ Đã hủy phiên nạp tiền.\nBạn có thể dùng lại các lệnh khác bình thường.",
         parse_mode="HTML",
@@ -577,6 +619,16 @@ async def huynap_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     watch_task = _naptien_watch_tasks.pop(key, None)
     if watch_task:
         watch_task.cancel()
+    await asyncio.to_thread(
+        log_deposit_history,
+        telegram_user_id=query.from_user.id,
+        chat_id=key[0],
+        package_code=str(pending.get("package_code") or ""),
+        amount=int(pending.get("amount") or 0),
+        payment_code=str(pending.get("payment_code") or ""),
+        status="cancelled",
+        detail="inline_cancel_button",
+    )
     await query.answer("Đã hủy nạp tiền.", show_alert=False)
     await query.message.reply_text(
         "✅ Đã hủy phiên nạp tiền.\nBạn có thể dùng lại các lệnh khác bình thường.",
