@@ -251,15 +251,15 @@ NAPTIEN_HELP_TEXT = (
     "💎 <b>BẢNG GIÁ NẠP TIỀN</b>\n"
     "____________________________\n\n"
     "🚀 <b>Gói REG (Reg + Voucher unlimited):</b>\n"
-    "• /naptien reg1 → 100K (1 ngày)\n"
-    "• /naptien reg7 → 500K (7 ngày)\n"
-    "• /naptien reg30 → 1.000K (30 ngày)\n\n"
+    "• /naptoken reg1 → 75K (1 ngày)\n"
+    "• /naptoken reg7 → 375K (7 ngày)\n"
+    "• /naptoken reg30 → 750K (30 ngày)\n\n"
     "🎫 <b>Gói SV (Chỉ Voucher unlimited):</b>\n"
-    "• /naptien sv7 → 200K (7 ngày)\n"
-    "• /naptien sv30 → 500K (30 ngày)\n\n"
+    "• /naptoken sv7 → 150K (7 ngày)\n"
+    "• /naptoken sv30 → 375K (30 ngày)\n\n"
     "💰 <b>Credit lẻ (1.000đ/lượt):</b>\n"
-    "• /naptien 10 → 10.000đ\n"
-    "• /naptien 100 → 100.000đ\n\n"
+    "• /naptoken 10 → 10.000đ\n"
+    "• /naptoken 100 → 100.000đ\n\n"
     "⏳ <i>Hệ thống tự động cộng sau 1–2 phút.</i>"
 )
 
@@ -336,7 +336,7 @@ async def _watch_naptien_payment(
     package_code: str,
     bot,
 ) -> None:
-    """Watcher theo từng phiên /naptien: chỉ quét khi có đơn nạp mới."""
+    """Watcher theo từng phiên /naptoken: chỉ quét khi có đơn nạp mới."""
     key = (chat_id, user_id)
     try:
         while True:
@@ -360,7 +360,7 @@ async def _watch_naptien_payment(
                 )
                 await bot.send_message(
                     chat_id=chat_id,
-                    text="⌛ Phiên nạp tiền đã hết hạn. Vui lòng tạo lệnh /naptien mới nếu cần.",
+                    text="⌛ Phiên nạp tiền đã hết hạn. Vui lòng tạo lệnh /naptoken mới nếu cần.",
                 )
                 return
 
@@ -439,7 +439,7 @@ async def naptien_pending_command_guard(update: Update, context: ContextTypes.DE
         return
     raw_cmd = (msg.text.split()[0] if msg.text else "").strip().lower()
     cmd = raw_cmd.lstrip("/").split("@", 1)[0]
-    if cmd in {"naptien", "huynap"}:
+    if cmd in {"naptoken", "huynap"}:
         return
     await msg.reply_text(
         "⏳ Bạn đang có phiên nạp tiền chưa hoàn tất.\n"
@@ -450,7 +450,7 @@ async def naptien_pending_command_guard(update: Update, context: ContextTypes.DE
 
 
 async def naptien_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lệnh /naptien [goi|so_k] — tạo đơn nạp + sinh QR VietQR."""
+    """Lệnh /naptoken [goi|so_k] — tạo đơn nạp + sinh QR VietQR."""
     msg = update.effective_message
     if not msg:
         return
@@ -484,13 +484,13 @@ async def naptien_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pkg_price_k is not None:
         amount = int(pkg_price_k) * 1000
     elif raw.isdigit():
-        # /naptien 10 => 10.000đ
+        # /naptoken 10 => 10.000đ
         amount = int(raw) * 1000
         package_code = f"custom_{raw}k"
     else:
         await msg.reply_text(
             "❌ Nội dung không hợp lệ.\n"
-            "Dùng <code>/naptien reg1</code> hoặc <code>/naptien 10</code>.",
+            "Dùng <code>/naptoken reg1</code> hoặc <code>/naptoken 10</code>.",
             parse_mode="HTML",
         )
         return
@@ -555,7 +555,7 @@ async def naptien_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ Chuyển khoản đúng số tiền và đúng nội dung để hệ thống tự cộng."
     )
     cancel_markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("❌ Hủy nạp tiền", callback_data="naptien_cancel")]]
+        [[InlineKeyboardButton("❌ Hủy nạp tiền", callback_data="naptoken_cancel")]]
     )
     try:
         await msg.reply_photo(
@@ -1019,7 +1019,9 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Gói lưu voucher / lượt free còn lại
     DAILY_FREE_LIMIT = 5
     vsub = get_active_voucher_subscription(telegram_user_id)
-    if vsub:
+    if reg_subs:
+        voucher_text = "Unlimited"
+    elif vsub:
         vcode = (vsub.get("package_code") or "?").strip()
         exp_v = _format_expires_vn(vsub.get("expires_at"))
         voucher_text = f"{vcode} — hết hạn: {exp_v}" if exp_v else vcode
@@ -1031,8 +1033,8 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"👤 Tên: {_escape(display_name)}\n"
         f"📦 Gói reg: {reg_text}\n"
-        f"🎫 Gói lưu voucher: {voucher_text}\n"
-        f"💰 Số tiền còn lại: {balance}"
+        f"🎫 Gói lưu voucher FREE: {voucher_text}\n"
+        f"💰 Token còn lại: {balance}"
     )
     await msg.reply_text(text)
 
@@ -3180,17 +3182,17 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
         & filters.Regex(re.compile(r"^G[A-Za-z0-9]{7}$"))
     )
 
-    # Chặn các command khác khi user đang pending nạp tiền (trừ /naptien, /huynap).
+    # Chặn các command khác khi user đang pending nạp tiền (trừ /naptoken, /huynap).
     application.add_handler(MessageHandler(filters.COMMAND, naptien_pending_command_guard), group=-1)
 
     application.add_handler(CommandHandler("start", start_wrapper))
-    application.add_handler(CommandHandler("naptien", naptien_wrapper))
+    application.add_handler(CommandHandler("naptoken", naptien_wrapper))
     application.add_handler(CommandHandler("huynap", huynap_wrapper))
     application.add_handler(CommandHandler("info", info_wrapper))
     application.add_handler(CommandHandler("changemail", changemail_wrapper))
     application.add_handler(CommandHandler("huyotp", huyotp_wrapper))
     application.add_handler(CallbackQueryHandler(start_callback_wrapper, pattern=r"^start_"))
-    application.add_handler(CallbackQueryHandler(huynap_callback_wrapper, pattern=r"^naptien_cancel$"))
+    application.add_handler(CallbackQueryHandler(huynap_callback_wrapper, pattern=r"^naptoken_cancel$"))
     application.add_handler(CallbackQueryHandler(huyotp_callback_wrapper, pattern=r"^changemail_huyotp$"))
     application.add_handler(CommandHandler("cvc", cvc_wrapper))
     application.add_handler(CommandHandler("cks", cks_wrapper))
