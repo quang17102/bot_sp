@@ -2461,9 +2461,9 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not has_reg:
         tien = int(db_user.get("tien") or 0) if db_user else 0
         cost = sl * REG_PRICE
-        if not (tien > cost):
+        if not (tien >= cost):
             await update.message.reply_text(
-                "❌ Bạn chưa có gói reg: cần số dư <b>lớn hơn</b> "
+                "❌ Bạn chưa có gói reg: cần số dư <b>ít nhất</b> "
                 f"<code>{cost}</code>đ (mỗi lần reg {REG_PRICE}đ × <code>{sl}</code> lần).\n"
                 "Hoặc mua gói reg để không trừ tiền theo lần.",
                 parse_mode="HTML",
