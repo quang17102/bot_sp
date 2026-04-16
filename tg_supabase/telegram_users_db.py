@@ -73,8 +73,8 @@ def get_telegram_user(telegram_user_id: int) -> Optional[Dict]:
 
 def set_user_excel_link(telegram_user_id: int, excel_url: str) -> bool:
     """
-    Ghi link Google Sheet (hoặc chuỗi tùy ý) vào cột excel.
-    User chưa có dòng: insert tối thiểu telegram_user_id + excel.
+    Ghi link Google Sheet (hoặc chuỗi tùy ý) vào cột excel_link.
+    User chưa có dòng: insert tối thiểu telegram_user_id + excel_link.
     """
     excel_url = excel_url.strip()
     if not excel_url:
@@ -89,17 +89,17 @@ def set_user_excel_link(telegram_user_id: int, excel_url: str) -> bool:
             .execute()
         )
         if existing.data:
-            sb.table("telegram_users").update({"excel": excel_url}).eq(
+            sb.table("telegram_users").update({"excel_link": excel_url}).eq(
                 "telegram_user_id", telegram_user_id
             ).execute()
         else:
             sb.table("telegram_users").insert(
-                {"telegram_user_id": telegram_user_id, "excel": excel_url}
+                {"telegram_user_id": telegram_user_id, "excel_link": excel_url}
             ).execute()
         return True
     except Exception:
         logger.exception(
-            "Không cập nhật được excel cho user_id=%s",
+            "Không cập nhật được excel_link cho user_id=%s",
             telegram_user_id,
         )
         return False
