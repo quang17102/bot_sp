@@ -501,8 +501,8 @@ def format_email_detail(email: Dict[str, Any]) -> str:
             message += f"📍 <b>Vị trí:</b> {location}\n"
         
         # Link xác minh
-        # if verification_link:
-        #     message += f"🔗 <b>Link xác minh:</b> <code>{verification_link}</code>\n"
+        if verification_link:
+            message += f"🔗 <b>Link xác minh:</b> <code>{verification_link}</code>\n"
         
         return message
     
