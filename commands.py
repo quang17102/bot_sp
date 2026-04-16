@@ -82,6 +82,7 @@ _NAPTIEN_PENDING_TTL_SEC = 900.0
 _naptien_watch_tasks: dict[tuple[int, int], asyncio.Task] = {}
 _SUBSCRIPTION_CODES = {"reg1", "reg7", "reg30", "sv7", "sv30"}
 _NAPTIEN_TOKEN = "b617cbd01175f731323645384c9126fa"
+_addsheet_pending: dict[tuple[int, int], str] = {}
 _PACKAGE_LABELS = {
     "reg1": "Gói REG 1 ngày",
     "reg7": "Gói REG 7 ngày",
@@ -2349,34 +2350,37 @@ async def delpx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def setsheet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def addsheet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Lưu / xem link sheet (cột excel trong bảng telegram_users).
 
     Cú pháp:
-      - /setsheet
+      - /addsheet
             Xem link đang lưu (nếu có).
-      - /setsheet <link_sheet>
-            Lưu link vào Supabase theo telegram_user_id.
+      - /addsheet <link_sheet>
+            Tạo phiên chờ xác nhận lưu link sheet.
     """
     user = update.effective_user
-    if not user:
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not user or not msg or not chat:
         await update.message.reply_text("❌ Không lấy được thông tin user.")
         return
 
     user_id = user.id
+    key = (chat.id, user_id)
 
     if not context.args:
         row = get_telegram_user(user_id)
         link = (row or {}).get("excel") if row else None
         if not link:
-            await update.message.reply_text(
+            await msg.reply_text(
                 "📭 Chưa có link sheet.\n"
-                "Cú pháp: <code>/setsheet https://docs.google.com/spreadsheets/...</code>",
+                "Cú pháp: <code>/addsheet https://docs.google.com/spreadsheets/...</code>",
                 parse_mode="HTML",
             )
             return
-        await update.message.reply_text(
+        await msg.reply_text(
             "📎 Link sheet hiện tại:\n"
             f"<code>{html.escape(str(link))}</code>",
             parse_mode="HTML",
@@ -2385,23 +2389,47 @@ async def setsheet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sheet_link = " ".join(context.args).strip()
     if not sheet_link:
-        await update.message.reply_text(
+        await msg.reply_text(
             "❌ Link không hợp lệ.\n"
-            "Cú pháp: <code>/setsheet https://...</code>",
+            "Cú pháp: <code>/addsheet https://...</code>",
             parse_mode="HTML",
         )
         return
 
-    if not set_user_excel_link(user_id, sheet_link):
-        await update.message.reply_text(
-            "❌ Không lưu được link",
-            parse_mode="HTML",
-        )
+    _addsheet_pending[key] = sheet_link
+    confirm_markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ Xác nhận", callback_data="addsheet_confirm")]]
+    )
+    await msg.reply_text(
+        "Bạn hãy Share quyền Editor cho email:\n"
+        "<code>botbindshopee@gmail.com</code>\n\n"
+        "Sau khi share xong, bấm nút <b>Xác nhận</b> bên dưới để lưu link sheet.",
+        parse_mode="HTML",
+        reply_markup=confirm_markup,
+    )
+
+
+async def addsheet_confirm_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lưu link sheet sau khi user bấm nút xác nhận đã share Editor."""
+    query = update.callback_query
+    if not query or not query.message or not query.from_user:
+        return
+    key = (query.message.chat_id, query.from_user.id)
+    sheet_link = (_addsheet_pending.get(key) or "").strip()
+    if not sheet_link:
+        await query.answer("Không có link sheet chờ xác nhận.", show_alert=False)
         return
 
-    await update.message.reply_text(
+    ok = await asyncio.to_thread(set_user_excel_link, query.from_user.id, sheet_link)
+    if not ok:
+        await query.answer("Lưu link thất bại.", show_alert=True)
+        return
+
+    _addsheet_pending.pop(key, None)
+    await query.answer("Đã lưu link sheet.", show_alert=False)
+    await query.message.reply_text(
         "✅ Đã lưu link sheet.\n"
-        "Xem lại: <code>/setsheet</code>",
+        "Xem lại: <code>/addsheet</code>",
         parse_mode="HTML",
     )
 
@@ -2412,7 +2440,7 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     Có gói reg active: không trừ tien.
     Không có gói reg: cần tien > sl * 1000 (mỗi lần reg 1000đ), sau khi tạo yêu cầu trừ sl * 1000.
-    Bắt buộc đã lưu link sheet (cột excel trong telegram_users) qua /setsheet.
+    Bắt buộc đã lưu link sheet (cột excel trong telegram_users) qua /addsheet.
 
     Nếu đã có dòng reg_acc với cùng id_tele thì từ chối.
     """
@@ -3206,7 +3234,8 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CommandHandler("kipx", kipx_command))
     application.add_handler(CommandHandler("vnpx", vnpx_command))
     application.add_handler(CommandHandler("delpx", delpx_command))
-    application.add_handler(CommandHandler("setsheet", setsheet_command))
+    application.add_handler(CommandHandler("addsheet", addsheet_command))
+    application.add_handler(CallbackQueryHandler(addsheet_confirm_callback_handler, pattern=r"^addsheet_confirm$"))
     application.add_handler(CommandHandler("reg", reg_command))
     for token_cmd in OTP_TOKEN_PROVIDERS:
         application.add_handler(CommandHandler(token_cmd, otp_provider_token_command))
