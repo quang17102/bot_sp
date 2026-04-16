@@ -44,7 +44,6 @@ from add_diachi import AddAddressInput, add_address_direct, normalize_phone as n
 import login
 import login_qr
 from tg_supabase.telegram_users_db import (
-    decrease_user_tien,
     get_telegram_user,
     increase_user_tien,
     save_user_on_start,
@@ -53,7 +52,11 @@ from tg_supabase.telegram_users_db import (
 from tg_supabase.reg_acc_db import insert_reg_request
 from tg_supabase.deposit_orders import get_package_price_k
 from tg_supabase.deposit_history import log_deposit_history
-from tg_supabase.subscriptions import create_reg_subscription, get_active_reg_subscriptions
+from tg_supabase.subscriptions import (
+    create_reg_subscription,
+    delete_expired_reg_subscriptions,
+    get_active_reg_subscriptions,
+)
 from tg_supabase.voucher_logs import (
     get_active_voucher_subscription,
     get_free_voucher_used_today,
@@ -1000,6 +1003,7 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     display_name = (
         (user.full_name or user.username or user.first_name or "bạn").strip()
     )
+    await asyncio.to_thread(delete_expired_reg_subscriptions, telegram_user_id)
 
     # Thông tin từ bảng telegram_users
     db_user = get_telegram_user(telegram_user_id)
@@ -1015,7 +1019,7 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         exp_reg = _format_expires_vn(first_reg.get("expires_at"))
         reg_text = f"{reg_pkg} — hết hạn: {exp_reg}" if exp_reg else reg_pkg
     else:
-        reg_text = "không có gói nào"
+        reg_text = "không có gói nào active"
 
     # Gói lưu voucher / lượt free còn lại
     DAILY_FREE_LIMIT = 5
@@ -2352,7 +2356,7 @@ async def delpx_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def addsheet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Lưu / xem link sheet (cột excel trong bảng telegram_users).
+    Lưu / xem link sheet (cột excel_link trong bảng telegram_users).
 
     Cú pháp:
       - /addsheet
@@ -2372,7 +2376,7 @@ async def addsheet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         row = get_telegram_user(user_id)
-        link = (row or {}).get("excel") if row else None
+        link = (row or {}).get("excel_link") if row else None
         if not link:
             await msg.reply_text(
                 "📭 Chưa có link sheet.\n"
@@ -2440,7 +2444,7 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     Có gói reg active: không trừ tien.
     Không có gói reg: cần tien > sl * 1000 (mỗi lần reg 1000đ), sau khi tạo yêu cầu trừ sl * 1000.
-    Bắt buộc đã lưu link sheet (cột excel trong telegram_users) qua /addsheet.
+    Bắt buộc đã lưu link sheet (cột excel_link trong telegram_users) qua /addsheet.
 
     Nếu đã có dòng reg_acc với cùng id_tele thì từ chối.
     """
@@ -2474,8 +2478,10 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    await asyncio.to_thread(delete_expired_reg_subscriptions, user.id)
+
     db_user = get_telegram_user(user.id)
-    sheet_raw = (db_user or {}).get("excel")
+    sheet_raw = (db_user or {}).get("excel_link")
     sheet_link = str(sheet_raw).strip() if sheet_raw else ""
     if not sheet_link:
         await update.message.reply_text(
@@ -2484,19 +2490,13 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    REG_PRICE = 1000
     has_reg = bool(get_active_reg_subscriptions(user.id))
     if not has_reg:
-        tien = int(db_user.get("tien") or 0) if db_user else 0
-        cost = sl * REG_PRICE
-        if not (tien >= cost):
-            await update.message.reply_text(
-                "❌ Bạn chưa có gói reg: cần số dư <b>ít nhất</b> "
-                f"<code>{cost}</code>đ (mỗi lần reg {REG_PRICE}đ × <code>{sl}</code> lần).\n"
-                "Hoặc mua gói reg để không trừ tiền theo lần.",
-                parse_mode="HTML",
-            )
-            return
+        await update.message.reply_text(
+            "❌ Bạn hiện không có gói REG active.",
+            parse_mode="HTML",
+        )
+        return
 
     result = insert_reg_request(user.id, sl)
     if result == "busy":
@@ -2516,14 +2516,6 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
         )
         return
-
-    if not has_reg:
-        if not decrease_user_tien(user.id, sl * REG_PRICE):
-            await update.message.reply_text(
-                "❌ Đã tạo yêu cầu nhưng không trừ được số dư. Báo admin kiểm tra.",
-                parse_mode="HTML",
-            )
-            return
 
     await update.message.reply_text(
         f"✅ Đã tạo yêu cầu reg <code>{sl}</code> acc.",

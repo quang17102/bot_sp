@@ -174,6 +174,24 @@ def get_active_reg_subscriptions(telegram_user_id: int) -> list[dict]:
         return []
 
 
+def delete_expired_reg_subscriptions(telegram_user_id: int) -> bool:
+    """Xóa cứng các gói REG hết hạn của user (reg1/reg7/reg30)."""
+    sb = _get_client()
+    now_iso = datetime.now(TZ_VN).isoformat()
+    try:
+        sb.table("user_subscriptions").delete().eq("telegram_user_id", telegram_user_id).eq(
+            "status", "active"
+        ).in_("package_code", ["reg1", "reg7", "reg30"]).lte(
+            "expires_at", now_iso
+        ).execute()
+        return True
+    except Exception:
+        logger.exception(
+            "Không xóa được reg subscriptions hết hạn cho user=%s", telegram_user_id
+        )
+        return False
+
+
 def main():
     create_reg_subscription(1204125067, "reg1")
 if __name__ == "__main__":
