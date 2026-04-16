@@ -10,7 +10,6 @@ from __future__ import annotations
 import requests
 import html
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
-from voucher_status import VOUCHER_BATCH_LIST_HARDCODED
 
 SAVE_VOUCHER_URL = "https://mall.shopee.vn/api/v4/microsite/save_voucher"
 

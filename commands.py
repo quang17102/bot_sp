@@ -2672,11 +2672,151 @@ async def adddiachi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def voucher_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Thêm voucher mall vào DB.
+
+    Cú pháp:
+      /voucher_add <ten_ma> # <promotionid> # <voucher_code> # <signature>
+    """
+    msg = update.effective_message
+    if not msg:
+        return
+
+    raw = " ".join(context.args or []).strip()
+    if not raw:
+        await msg.reply_text(
+            "❌ Thiếu tham số.\n"
+            "Cú pháp:\n"
+            "<code>/voucher_add ten_ma # promotionid # voucher_code # signature</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    parts = [p.strip() for p in raw.split("#")]
+    if len(parts) != 4:
+        await msg.reply_text(
+            "❌ Sai định dạng.\n"
+            "Cú pháp:\n"
+            "<code>/voucher_add ten_ma # promotionid # voucher_code # signature</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    ten_ma, promotionid_raw, voucher_code, signature = parts
+    if not promotionid_raw:
+        await msg.reply_text("❌ Thiếu <code>promotionid</code>.", parse_mode="HTML")
+        return
+
+    try:
+        promotionid = int(promotionid_raw)
+    except ValueError:
+        await msg.reply_text("❌ <code>promotionid</code> phải là số.", parse_mode="HTML")
+        return
+
+    if not voucher_code or not signature:
+        await msg.reply_text(
+            "❌ <code>voucher_code</code> và <code>signature</code> không được rỗng.",
+            parse_mode="HTML",
+        )
+        return
+
+    from tg_supabase.mall_vouchers_db import add_mall_voucher
+
+    ok = await asyncio.to_thread(
+        add_mall_voucher,
+        ten_ma,
+        promotionid,
+        voucher_code,
+        signature,
+    )
+    if not ok:
+        await msg.reply_text("❌ Add voucher thất bại (Supabase / RLS).", parse_mode="HTML")
+        return
+
+    await msg.reply_text(
+        "✅ Đã thêm voucher.\n"
+        f"• Tên: <code>{html.escape(ten_ma or '')}</code>\n"
+        f"• promotionid: <code>{promotionid}</code>\n"
+        f"• voucher_code: <code>{html.escape(voucher_code)}</code>",
+        parse_mode="HTML",
+    )
+
+
+async def voucher_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """In danh sách voucher mall từ DB, mỗi voucher có nút Xóa."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    from tg_supabase.mall_vouchers_db import list_mall_vouchers
+
+    rows = await asyncio.to_thread(list_mall_vouchers, 200)
+    if not rows:
+        await msg.reply_text("📭 Danh sách voucher đang trống.")
+        return
+
+    await msg.reply_text(f"📃 Tổng voucher: <b>{len(rows)}</b>", parse_mode="HTML")
+    for r in rows:
+        vid = r.get("id")
+        if vid is None:
+            continue
+        ten_ma = (r.get("ten_ma") or "").strip()
+        promotionid = r.get("promotionid")
+        voucher_code = r.get("voucher_code")
+        signature = r.get("signature")
+
+        text = (
+            f"🆔 <code>{html.escape(str(vid))}</code>\n"
+            f"🏷️ <code>{html.escape(ten_ma or '-')}</code>\n"
+            f"• promotionid: <code>{html.escape(str(promotionid or ''))}</code>\n"
+            f"• voucher_code: <code>{html.escape(str(voucher_code or ''))}</code>\n"
+            f"• signature: <code>{html.escape(str(signature or ''))}</code>"
+        )
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Xóa", callback_data=f"vdel|{vid}")]]
+        )
+        await msg.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+async def voucher_delete_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """Xóa voucher khi user bấm nút inline."""
+    q = update.callback_query
+    if not q or not q.data:
+        return
+    data = str(q.data)
+    if not data.startswith("vdel|"):
+        return
+    raw_id = data.split("|", 1)[-1].strip()
+    try:
+        voucher_id = int(raw_id)
+    except ValueError:
+        await q.answer("ID không hợp lệ.", show_alert=True)
+        return
+
+    from tg_supabase.mall_vouchers_db import delete_mall_voucher
+
+    ok = await asyncio.to_thread(delete_mall_voucher, voucher_id)
+    if not ok:
+        await q.answer("Xóa thất bại (Supabase/RLS).", show_alert=True)
+        return
+
+    await q.answer("Đã xóa voucher.", show_alert=False)
+    try:
+        if q.message:
+            await q.message.edit_text("✅ Đã xóa voucher.")
+    except BadRequest:
+        # Ví dụ message quá cũ / không sửa được → bỏ qua
+        pass
+
+
 async def vc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Lưu batch voucher mall: ``user|pass|sdt|SPC_F=...`` → lấy SPC_ST qua proxy,
-    hoặc ``SPC_ST=...`` / chỉ giá trị SPC_ST. Gọi ``save_voucher_batch`` với
-    ``VOUCHER_BATCH_LIST_HARDCODED`` (proxy bắt buộc).
+    hoặc ``SPC_ST=...`` / chỉ giá trị SPC_ST. Danh sách voucher lấy từ DB
+    (bảng ``mall_vouchers``). Proxy bắt buộc.
     """
     if not update.message:
         return
@@ -2710,9 +2850,36 @@ async def vc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         from save_voucher import format_vc_telegram_html, save_voucher_batch
-        from voucher_status import VOUCHER_BATCH_LIST_HARDCODED
+        from tg_supabase.mall_vouchers_db import list_mall_vouchers
 
         cookie_header: Optional[str] = None
+        voucher_rows = await asyncio.to_thread(list_mall_vouchers, 200)
+        if not voucher_rows:
+            await update.message.reply_text(
+                "📭 Danh sách voucher đang trống.\n"
+                "Hãy thêm voucher bằng <code>/voucher_add</code> trước.",
+                parse_mode="HTML",
+            )
+            return
+
+        voucher_items = [
+            {
+                "ten_ma": (r.get("ten_ma") or "").strip() or None,
+                "promotionid": r.get("promotionid"),
+                "voucher_code": r.get("voucher_code"),
+                "signature": r.get("signature"),
+            }
+            for r in voucher_rows
+            if r.get("promotionid") is not None
+            and r.get("voucher_code")
+            and r.get("signature")
+        ]
+        if not voucher_items:
+            await update.message.reply_text(
+                "❌ Voucher trong DB thiếu trường bắt buộc (promotionid/voucher_code/signature).",
+                parse_mode="HTML",
+            )
+            return
 
         if "|" in raw and "SPC_F" in raw.upper():
             try:
@@ -2780,7 +2947,7 @@ async def vc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         results = await asyncio.to_thread(
             save_voucher_batch,
-            VOUCHER_BATCH_LIST_HARDCODED,
+            voucher_items,
             cookie_header=cookie_header,
             csrftoken=None,
             proxies=proxies,
@@ -3229,10 +3396,13 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CommandHandler("addsheet", addsheet_command))
     application.add_handler(CallbackQueryHandler(addsheet_confirm_callback_handler, pattern=r"^addsheet_confirm$"))
     application.add_handler(CommandHandler("reg", reg_command))
+    application.add_handler(CommandHandler("voucher_add", voucher_add_command))
+    application.add_handler(CommandHandler("voucher_list", voucher_list_command))
     for token_cmd in OTP_TOKEN_PROVIDERS:
         application.add_handler(CommandHandler(token_cmd, otp_provider_token_command))
     application.add_handler(CommandHandler("deltoken", deltoken_command))
     application.add_handler(CommandHandler("vc", vc_wrapper))
+    application.add_handler(CallbackQueryHandler(voucher_delete_callback_handler, pattern=r"^vdel\|"))
     application.add_handler(CallbackQueryHandler(email_callback_wrapper, pattern="^email_"))
     application.add_handler(CallbackQueryHandler(spx_callback_wrapper, pattern=r"^spx_[dcrshw]\|"))
     application.add_handler(MessageHandler(spx_text_filter, spx_tracking_message_handler))

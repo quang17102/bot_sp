@@ -15,11 +15,7 @@ from mail.utils import process_mailfree
 import login
 import login_qr
 import voucher_status
-from voucher_status import (
-    VOUCHER_BATCH_LIST_HARDCODED,
-    fetch_voucher_batch_parallel,
-    format_batch_cards_telegram_html,
-)
+from voucher_status import fetch_voucher_batch_parallel, format_batch_cards_telegram_html
 from proxy_storage import get_user_best_proxy
 
 # Giờ Việt Nam (UTC+7, không DST)
@@ -99,8 +95,8 @@ def _format_cks_success_from_user_info(
 
 def handle_cvc(job: Job) -> Dict[str, Any]:
     """
-    Handler cho /cvc — gọi API voucher mall (đa luồng) với danh sách hardcode
-    ``VOUCHER_BATCH_LIST_HARDCODED`` trong ``voucher_status.py``, hiển thị thẻ voucher (HTML).
+    Handler cho /cvc — gọi API voucher mall (đa luồng) với danh sách lấy từ DB
+    (bảng ``mall_vouchers``), hiển thị thẻ voucher (HTML).
     Cookie mall: biến môi trường ``SHOPEE_MALL_COOKIE`` (có thể rỗng).
     **Không dùng proxy** — luôn gọi trực tiếp (check voucher).
     """
@@ -111,11 +107,32 @@ def handle_cvc(job: Job) -> Dict[str, Any]:
 
     try:
         cookie = os.getenv("SHOPEE_MALL_COOKIE", "").strip()
-        items = list(VOUCHER_BATCH_LIST_HARDCODED)
+        from tg_supabase.mall_vouchers_db import list_mall_vouchers
+
+        voucher_rows = list_mall_vouchers(200)
+        if not voucher_rows:
+            return {
+                "status": "success",
+                "message": "📭 Danh sách voucher đang trống — thêm bằng <code>/voucher_add</code> trước.",
+                "message_format": "HTML",
+            }
+
+        items = [
+            {
+                "ten_ma": (r.get("ten_ma") or "").strip() or None,
+                "promotionid": r.get("promotionid"),
+                "voucher_code": r.get("voucher_code"),
+                "signature": r.get("signature"),
+            }
+            for r in voucher_rows
+            if r.get("promotionid") is not None
+            and r.get("voucher_code")
+            and r.get("signature")
+        ]
         if not items:
             return {
                 "status": "success",
-                "message": "❌ <b>VOUCHER_BATCH_LIST_HARDCODED</b> đang rỗng — thêm voucher trong <code>voucher_status.py</code>.",
+                "message": "❌ Voucher trong DB thiếu trường bắt buộc (promotionid/voucher_code/signature).",
                 "message_format": "HTML",
             }
 
