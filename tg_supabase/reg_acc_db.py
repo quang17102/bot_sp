@@ -69,3 +69,17 @@ def insert_reg_request(telegram_user_id: int, sl: int) -> RegInsertResult:
             sl,
         )
         return "error"
+
+
+def delete_reg_acc_for_user(telegram_user_id: int) -> bool:
+    """Xóa mọi dòng reg_acc của user (hủy yêu cầu reg đang chờ)."""
+    try:
+        sb = _get_client()
+        sb.table("reg_acc").delete().eq("id_tele", _id_tele(telegram_user_id)).execute()
+        return True
+    except Exception:
+        logger.exception(
+            "Không xóa được reg_acc cho user_id=%s",
+            telegram_user_id,
+        )
+        return False

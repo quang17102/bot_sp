@@ -49,7 +49,11 @@ from tg_supabase.telegram_users_db import (
     save_user_on_start,
     set_user_excel_link,
 )
-from tg_supabase.reg_acc_db import insert_reg_request
+from tg_supabase.reg_acc_db import (
+    delete_reg_acc_for_user,
+    has_reg_acc_row_for_user,
+    insert_reg_request,
+)
 from tg_supabase.deposit_orders import get_package_price_k
 from tg_supabase.deposit_history import log_deposit_history
 from tg_supabase.subscriptions import (
@@ -2501,7 +2505,9 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = insert_reg_request(user.id, sl)
     if result == "busy":
         await update.message.reply_text(
-            "Bạn vẫn đang reg acc, thêm lệnh sau khi hoàn thành nhé!",
+            "Bạn vẫn đang reg acc.\n"
+            "Dùng <code>/huyreg</code> để hủy yêu cầu, hoặc đợi xử lý xong rồi <code>/reg</code> lại.",
+            parse_mode="HTML",
         )
         return
     if result == "invalid":
@@ -2519,6 +2525,35 @@ async def reg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"✅ Đã tạo yêu cầu reg <code>{sl}</code> acc.",
+        parse_mode="HTML",
+    )
+
+
+async def huyreg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Hủy yêu cầu reg acc đang chờ: xóa dòng reg_acc của user trong DB."""
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not user:
+        return
+
+    has_row = await asyncio.to_thread(has_reg_acc_row_for_user, user.id)
+    if not has_row:
+        await msg.reply_text(
+            "ℹ️ Bạn không có yêu cầu reg nào đang chờ để hủy.",
+            parse_mode="HTML",
+        )
+        return
+
+    ok = await asyncio.to_thread(delete_reg_acc_for_user, user.id)
+    if not ok:
+        await msg.reply_text(
+            "❌ Không hủy được yêu cầu (Supabase / RLS).",
+            parse_mode="HTML",
+        )
+        return
+
+    await msg.reply_text(
+        "✅ Đã hủy yêu cầu reg. Bạn có thể dùng <code>/reg</code> lại khi cần.",
         parse_mode="HTML",
     )
 
@@ -3396,6 +3431,7 @@ def setup_commands(application: 'Application', job_queue: JobQueue):
     application.add_handler(CommandHandler("addsheet", addsheet_command))
     application.add_handler(CallbackQueryHandler(addsheet_confirm_callback_handler, pattern=r"^addsheet_confirm$"))
     application.add_handler(CommandHandler("reg", reg_command))
+    application.add_handler(CommandHandler("huyreg", huyreg_command))
     application.add_handler(CommandHandler("voucher_add", voucher_add_command))
     application.add_handler(CommandHandler("voucher_list", voucher_list_command))
     for token_cmd in OTP_TOKEN_PROVIDERS:
